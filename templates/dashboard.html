@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }} · thinrouter</title>
+  <link rel="stylesheet" href="/admin/static/style.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">thinrouter</div>
+      <nav>
+        <a href="/admin" class="active">Dashboard</a>
+        <a href="/admin/connections">Connections</a>
+        <a href="/admin/routes">Routes</a>
+        <a href="/admin/keys">API Keys</a>
+        <a href="/admin/usage">Usage</a>
+      </nav>
+    </aside>
+    <main class="content">
+      <h1>Dashboard</h1>
+      <div class="cards">
+        <div class="card"><div class="label">Connections</div><div class="value">{{ stats.connections }}</div></div>
+        <div class="card"><div class="label">Routes</div><div class="value">{{ stats.routes }}</div></div>
+        <div class="card"><div class="label">API Keys</div><div class="value">{{ stats.api_keys }}</div></div>
+        <div class="card"><div class="label">Usage events</div><div class="value">{{ stats.usage_events }}</div></div>
+      </div>
+      <section class="panel">
+        <h2>Endpoint</h2>
+        <code class="codeblock">{{ endpoint }}</code>
+        <p class="muted">Point Claude Code / Cursor / curl at this base URL. Model: <code>route-name</code> or <code>connection/model</code>.</p>
+        <pre class="codeblock">curl -s {{ endpoint }}/chat/completions \
+  -H "Authorization: Bearer YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"my-route","messages":[{"role":"user","content":"hi"}]}'</pre>
+      </section>
+      <section class="panel">
+        <h2>Quick start</h2>
+        <ol>
+          <li>Add a <a href="/admin/connections">Connection</a> (base URL + API key)</li>
+          <li>Create a <a href="/admin/routes">Route</a> that maps a public model name to that connection</li>
+          <li>Optionally create an <a href="/admin/keys">API Key</a> (if none exist, /v1 is open for bootstrap)</li>
+        </ol>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

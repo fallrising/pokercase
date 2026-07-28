@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }} · thinrouter</title>
+  <link rel="stylesheet" href="/admin/static/style.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">thinrouter</div>
+      <nav>
+        <a href="/admin">Dashboard</a>
+        <a href="/admin/connections">Connections</a>
+        <a href="/admin/routes">Routes</a>
+        <a href="/admin/keys">API Keys</a>
+        <a href="/admin/usage" class="active">Usage</a>
+      </nav>
+    </aside>
+    <main class="content">
+      <h1>Usage</h1>
+      <section class="panel">
+        {% if events %}
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Model</th>
+              <th>Connection</th>
+              <th>Status</th>
+              <th>Latency</th>
+              <th>Error</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for e in events %}
+            <tr>
+              <td class="mono">{{ e.ts }}</td>
+              <td>{{ e.public_model or "—" }}</td>
+              <td class="mono">{{ e.connection_id or "—" }}</td>
+              <td>{{ e.status or "—" }}</td>
+              <td>{% if e.latency_ms %}{{ e.latency_ms }} ms{% else %}—{% endif %}</td>
+              <td class="error-cell">{{ e.error or "" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="muted">No requests yet.</p>
+        {% endif %}
+      </section>
+    </main>
+  </div>
+</body>
+</html>

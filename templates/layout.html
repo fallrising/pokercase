@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }} · thinrouter</title>
+  <link rel="stylesheet" href="/admin/static/style.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">thinrouter</div>
+      <nav>
+        <a href="/admin" class="{% if active == 'dashboard' %}active{% endif %}">Dashboard</a>
+        <a href="/admin/connections" class="{% if active == 'connections' %}active{% endif %}">Connections</a>
+        <a href="/admin/routes" class="{% if active == 'routes' %}active{% endif %}">Routes</a>
+        <a href="/admin/keys" class="{% if active == 'keys' %}active{% endif %}">API Keys</a>
+        <a href="/admin/usage" class="{% if active == 'usage' %}active{% endif %}">Usage</a>
+      </nav>
+      <p class="muted small">Thin OpenAI-compatible LLM proxy</p>
+    </aside>
+    <main class="content">
+      <h1>{{ title }}</h1>
+      {% block body %}{% endblock %}
+    </main>
+  </div>
+</body>
+</html>

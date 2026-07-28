@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }} · thinrouter</title>
+  <link rel="stylesheet" href="/admin/static/style.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">thinrouter</div>
+      <nav>
+        <a href="/admin">Dashboard</a>
+        <a href="/admin/connections">Connections</a>
+        <a href="/admin/routes" class="active">Routes</a>
+        <a href="/admin/keys">API Keys</a>
+        <a href="/admin/usage">Usage</a>
+      </nav>
+    </aside>
+    <main class="content">
+      <h1>Routes</h1>
+      <p class="muted">Public model name clients use → ordered connection targets (fallback).</p>
+
+      <section class="panel">
+        <h2>Add route</h2>
+        {% if connections %}
+        <form method="post" action="/admin/routes/new" class="form-grid">
+          <label>Public model <input name="public_model" required placeholder="cheap" /></label>
+          <label>Connection
+            <select name="connection_id" required>
+              {% for c in connections %}
+              <option value="{{ c.id }}">{{ c.name }}{% if c.default_model %} ({{ c.default_model }}){% endif %}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Model override <input name="model_override" placeholder="leave empty = connection default" /></label>
+          <button type="submit">Create</button>
+        </form>
+        <p class="muted small">MVP creates single-target routes. Add multi-target fallback via <code>POST /admin/api/routes</code> JSON API.</p>
+        {% else %}
+        <p class="muted">Create a connection first.</p>
+        {% endif %}
+      </section>
+
+      <section class="panel">
+        <h2>Existing</h2>
+        {% if routes %}
+        <table>
+          <thead>
+            <tr>
+              <th>Public model</th>
+              <th>Strategy</th>
+              <th>Targets</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in routes %}
+            <tr>
+              <td><code>{{ r.public_model }}</code></td>
+              <td>{{ r.strategy }}</td>
+              <td>
+                <ol class="tight">
+                  {% for t in r.targets %}
+                  <li>
+                    {{ t.connection_name or t.connection_id }}
+                    {% if t.model_override %} → <code>{{ t.model_override }}</code>{% endif %}
+                  </li>
+                  {% endfor %}
+                </ol>
+              </td>
+              <td>
+                <form method="post" action="/admin/routes/{{ r.id }}/delete" onsubmit="return confirm('Delete route?')">
+                  <button type="submit" class="danger">Delete</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="muted">No routes yet.</p>
+        {% endif %}
+      </section>
+    </main>
+  </div>
+</body>
+</html>

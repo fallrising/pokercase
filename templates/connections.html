@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }} · thinrouter</title>
+  <link rel="stylesheet" href="/admin/static/style.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">thinrouter</div>
+      <nav>
+        <a href="/admin">Dashboard</a>
+        <a href="/admin/connections" class="active">Connections</a>
+        <a href="/admin/routes">Routes</a>
+        <a href="/admin/keys">API Keys</a>
+        <a href="/admin/usage">Usage</a>
+      </nav>
+    </aside>
+    <main class="content">
+      <h1>Connections</h1>
+      <p class="muted">An OpenAI-compatible upstream: base URL + API key. Example base: <code>https://api.openai.com/v1</code></p>
+
+      <section class="panel">
+        <h2>Add connection</h2>
+        <form method="post" action="/admin/connections/new" class="form-grid">
+          <label>Name <input name="name" required placeholder="openai" /></label>
+          <label>Base URL <input name="base_url" required placeholder="https://api.openai.com/v1" /></label>
+          <label>API Key <input name="api_key" required type="password" placeholder="sk-..." /></label>
+          <label>Default model <input name="default_model" placeholder="gpt-4o-mini" /></label>
+          <label>Priority <input name="priority" type="number" value="100" /></label>
+          <button type="submit">Create</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>Existing</h2>
+        {% if connections %}
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Base URL</th>
+              <th>Key</th>
+              <th>Default model</th>
+              <th>Priority</th>
+              <th>Enabled</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in connections %}
+            <tr>
+              <td><strong>{{ c.name }}</strong></td>
+              <td class="mono">{{ c.base_url }}</td>
+              <td class="mono">{{ c.api_key_masked }}</td>
+              <td>{{ c.default_model or "—" }}</td>
+              <td>{{ c.priority }}</td>
+              <td>{% if c.enabled %}yes{% else %}no{% endif %}</td>
+              <td>
+                <form method="post" action="/admin/connections/{{ c.id }}/delete" onsubmit="return confirm('Delete {{ c.name }}?')">
+                  <button type="submit" class="danger">Delete</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="muted">No connections yet.</p>
+        {% endif %}
+      </section>
+    </main>
+  </div>
+</body>
+</html>

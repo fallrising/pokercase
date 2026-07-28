@@ -1,0 +1,370 @@
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::routing::{delete, get, post};
+use axum::{Json, Router};
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use crate::error::{AppError, AppResult};
+use crate::server::AppState;
+use crate::store::ConnectionPublic;
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/admin/api/stats", get(stats))
+        .route(
+            "/admin/api/connections",
+            get(list_connections).post(create_connection),
+        )
+        .route(
+            "/admin/api/connections/{id}",
+            get(get_connection)
+                .put(update_connection)
+                .delete(delete_connection),
+        )
+        .route(
+            "/admin/api/connections/{id}/test",
+            post(test_connection),
+        )
+        .route("/admin/api/routes", get(list_routes).post(create_route))
+        .route(
+            "/admin/api/routes/{id}",
+            delete(delete_route),
+        )
+        .route("/admin/api/keys", get(list_keys).post(create_key))
+        .route(
+            "/admin/api/keys/{id}",
+            delete(delete_key),
+        )
+        .route(
+            "/admin/api/keys/{id}/enable",
+            post(enable_key),
+        )
+        .route(
+            "/admin/api/keys/{id}/disable",
+            post(disable_key),
+        )
+        .route("/admin/api/usage", get(usage))
+}
+
+fn check_admin(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
+    let Some(token) = &state.cfg.admin_token else {
+        return Ok(());
+    };
+    let provided = headers
+        .get("x-admin-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if provided == token {
+        Ok(())
+    } else {
+        Err(AppError::Unauthorized)
+    }
+}
+
+async fn stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    Ok(Json(state.store.stats()?))
+}
+
+async fn list_connections(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    let rows: Vec<ConnectionPublic> = state
+        .store
+        .list_connections()?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    Ok(Json(json!({ "data": rows })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConnectionInput {
+    #[allow(dead_code)]
+    pub id: Option<String>,
+    pub name: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    pub default_model: Option<String>,
+    #[serde(default = "default_priority")]
+    pub priority: i64,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_priority() -> i64 {
+    100
+}
+fn default_true() -> bool {
+    true
+}
+
+async fn create_connection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ConnectionInput>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    check_admin(&state, &headers)?;
+    if input.name.trim().is_empty() || input.base_url.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "name and base_url are required".into(),
+        ));
+    }
+    if input.api_key.is_empty() {
+        return Err(AppError::BadRequest("api_key is required".into()));
+    }
+    let row = state.store.upsert_connection(
+        None,
+        input.name.trim(),
+        input.base_url.trim(),
+        &input.api_key,
+        input.default_model.as_deref(),
+        input.priority,
+        input.enabled,
+    )?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!(ConnectionPublic::from(row))),
+    ))
+}
+
+async fn get_connection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    let row = state
+        .store
+        .get_connection(&id)?
+        .ok_or_else(|| AppError::NotFound("connection not found".into()))?;
+    Ok(Json(json!(ConnectionPublic::from(row))))
+}
+
+async fn update_connection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<ConnectionInput>,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    let existing = state
+        .store
+        .get_connection(&id)?
+        .ok_or_else(|| AppError::NotFound("connection not found".into()))?;
+    let api_key = if input.api_key.is_empty() {
+        existing.api_key
+    } else {
+        input.api_key
+    };
+    let row = state.store.upsert_connection(
+        Some(id),
+        input.name.trim(),
+        input.base_url.trim(),
+        &api_key,
+        input.default_model.as_deref(),
+        input.priority,
+        input.enabled,
+    )?;
+    Ok(Json(json!(ConnectionPublic::from(row))))
+}
+
+async fn delete_connection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    if !state.store.delete_connection(&id)? {
+        return Err(AppError::NotFound("connection not found".into()));
+    }
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn test_connection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    let conn = state
+        .store
+        .get_connection(&id)?
+        .ok_or_else(|| AppError::NotFound("connection not found".into()))?;
+
+    let base = conn.base_url.trim_end_matches('/');
+    let url = if base.ends_with("/models") {
+        base.to_string()
+    } else {
+        format!("{base}/models")
+    };
+
+    let resp = state
+        .proxy
+        .http
+        .get(&url)
+        .header("authorization", format!("Bearer {}", conn.api_key))
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("test request failed: {e}")))?;
+
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    let snippet: String = body.chars().take(300).collect();
+    Ok(Json(json!({
+        "ok": status == 200,
+        "status": status,
+        "url": url,
+        "body_snippet": snippet,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RouteTargetInput {
+    pub connection_id: String,
+    pub model_override: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RouteInput {
+    pub public_model: String,
+    #[serde(default = "default_strategy")]
+    pub strategy: String,
+    pub targets: Vec<RouteTargetInput>,
+}
+
+fn default_strategy() -> String {
+    "fallback".into()
+}
+
+async fn list_routes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    Ok(Json(json!({ "data": state.store.list_routes()? })))
+}
+
+async fn create_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RouteInput>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    check_admin(&state, &headers)?;
+    if input.public_model.trim().is_empty() {
+        return Err(AppError::BadRequest("public_model is required".into()));
+    }
+    if input.targets.is_empty() {
+        return Err(AppError::BadRequest("at least one target required".into()));
+    }
+    let targets: Vec<(String, Option<String>)> = input
+        .targets
+        .into_iter()
+        .map(|t| (t.connection_id, t.model_override))
+        .collect();
+    let row = state.store.upsert_route(
+        None,
+        input.public_model.trim(),
+        &input.strategy,
+        &targets,
+    )?;
+    Ok((StatusCode::CREATED, Json(json!(row))))
+}
+
+async fn delete_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    if !state.store.delete_route(&id)? {
+        return Err(AppError::NotFound("route not found".into()));
+    }
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn list_keys(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    Ok(Json(json!({ "data": state.store.list_api_keys()? })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct KeyInput {
+    pub name: String,
+}
+
+async fn create_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<KeyInput>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    check_admin(&state, &headers)?;
+    let name = if input.name.trim().is_empty() {
+        "default"
+    } else {
+        input.name.trim()
+    };
+    let (row, raw) = state.store.create_api_key(name)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "key": row,
+            "secret": raw,
+            "warning": "Store this secret now; it will not be shown again."
+        })),
+    ))
+}
+
+async fn delete_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    if !state.store.delete_api_key(&id)? {
+        return Err(AppError::NotFound("key not found".into()));
+    }
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn enable_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    if !state.store.set_api_key_enabled(&id, true)? {
+        return Err(AppError::NotFound("key not found".into()));
+    }
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn disable_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    if !state.store.set_api_key_enabled(&id, false)? {
+        return Err(AppError::NotFound("key not found".into()));
+    }
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn usage(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    Ok(Json(json!({ "data": state.store.recent_usage(100)? })))
+}
