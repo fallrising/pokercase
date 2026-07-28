@@ -2,6 +2,9 @@
 
 A **thin** OpenAI-compatible LLM API proxy in Rust, inspired by [9router](https://github.com/decolua/9router) / [9router-go](https://github.com/luqman-v1/9router-go).
 
+**GitHub repo:** [fallrising/pokercase](https://github.com/fallrising/pokercase)  
+**Goals & progress:** [docs/GOALS_AND_PROGRESS.md](./docs/GOALS_AND_PROGRESS.md)
+
 **In scope:** `/v1/chat/completions` (stream + non-stream), model routes with fallback, web admin for connections / routes / keys, local SQLite.
 
 **Out of scope (for now):** OAuth subscription providers, MITM, RTK, Claude `/v1/messages`, media endpoints.
