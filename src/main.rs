@@ -3,6 +3,8 @@ mod agy;
 mod cancel;
 mod claude;
 mod config;
+mod cursor_agent;
+mod cursor_proto;
 mod cooldown;
 mod error;
 mod http_client;
@@ -94,6 +96,9 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Required when multiple rustls crypto backends are linked (reqwest + tokio-rustls).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),

@@ -228,6 +228,13 @@ async fn forward_chat_completions_inner(
                         }
                     }
                 }
+                UpstreamFormat::CursorAgent => {
+                    return Err(UpstreamAttemptError {
+                        status: 500,
+                        body: "cursor agent path should be handled before generic forward".into(),
+                        retryable: false,
+                    });
+                }
                 UpstreamFormat::Stub => unreachable!(),
             };
             let auth = providers::authorization_header(p, target.connection.bearer_token());
@@ -529,6 +536,95 @@ pub async fn handle_chat_with_fallback(
             return Err(AppError::BadRequest("client disconnected".into()));
         }
         let start = Instant::now();
+
+        // Cursor AgentService (HTTP/2) — dedicated path, not reqwest.
+        if let Some(p) = target
+            .connection
+            .oauth
+            .as_ref()
+            .and_then(|o| providers::resolve(&o.provider))
+        {
+            if p.format == UpstreamFormat::CursorAgent {
+                let mut t = target.clone();
+                if let Ok(fresh) =
+                    crate::oauth_refresh::ensure_fresh(&state.store, t.connection.clone()).await
+                {
+                    t.connection = fresh;
+                }
+                let machine_id = t
+                    .connection
+                    .oauth
+                    .as_ref()
+                    .and_then(|o| o.meta.as_deref())
+                    .and_then(|m| serde_json::from_str::<Value>(m).ok())
+                    .and_then(|v| {
+                        v.get("machine_id")
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.to_string())
+                    });
+                let msgs = match crate::cursor_agent::parse_chat_messages(&body) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return Err(e);
+                    }
+                };
+                match crate::cursor_agent::agent_chat_completions(
+                    t.connection.bearer_token(),
+                    machine_id.as_deref(),
+                    &t.upstream_model,
+                    &msgs,
+                )
+                .await
+                {
+                    Ok(bytes) => {
+                        let latency = start.elapsed().as_millis() as i64;
+                        state.cooldown.clear(&t.connection.id);
+                        let (pt, ct) = extract_usage_tokens(&bytes);
+                        let _ = state.store.log_usage(
+                            Some(public_model),
+                            Some(&t.connection.id),
+                            Some(200),
+                            Some(latency),
+                            None,
+                            pt,
+                            ct,
+                            None,
+                        );
+                        let _ = cancel_guard;
+                        return Ok(json_bytes_response(StatusCode::OK, bytes));
+                    }
+                    Err(AppError::Upstream { status, body }) => {
+                        let secs = cooldown_secs_for_status(status);
+                        if secs > 0 {
+                            state.cooldown.mark(&t.connection.id, secs);
+                        }
+                        let _ = state.store.log_usage(
+                            Some(public_model),
+                            Some(&t.connection.id),
+                            Some(status as i64),
+                            Some(start.elapsed().as_millis() as i64),
+                            Some(&body.chars().take(500).collect::<String>()),
+                            None,
+                            None,
+                            None,
+                        );
+                        if is_retryable_status(status) && idx + 1 < targets.len() {
+                            last_err = Some(UpstreamAttemptError {
+                                status,
+                                body,
+                                retryable: true,
+                            });
+                            continue;
+                        }
+                        return Err(AppError::Upstream { status, body });
+                    }
+                    Err(e) => {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
         match forward_chat_completions(state, target, body.clone(), stream, &cancel).await {
             Ok(fwd) => {
                 let latency = start.elapsed().as_millis() as i64;

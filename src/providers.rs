@@ -31,6 +31,8 @@ pub enum UpstreamFormat {
     AnthropicMessages,
     /// Google Antigravity cloudcode-pa generateContent
     Antigravity,
+    /// Cursor AgentService (HTTP/2 Connect+proto)
+    CursorAgent,
     /// Not yet implemented — refuse generic chat forward
     Stub,
 }
@@ -143,9 +145,9 @@ pub const ACTIVE: &[ProviderProfile] = &[
         aliases: &["cu"],
         display_name: "Cursor IDE",
         category: "oauth",
-        status: ProviderStatus::Partial,
-        default_base_url: "https://api2.cursor.sh",
-        format: UpstreamFormat::Stub,
+        status: ProviderStatus::Active,
+        default_base_url: "https://agent.api5.cursor.sh",
+        format: UpstreamFormat::CursorAgent,
         default_model: Some("default"),
         auth: AuthScheme::Bearer,
         extra_headers: &[
@@ -153,7 +155,7 @@ pub const ACTIVE: &[ProviderProfile] = &[
             ("connect-protocol-version", "1"),
         ],
         force_stream: false,
-        notes: "Token import ready (~/.config/cursor/auth.json). Protobuf executor not wired yet.",
+        notes: "AgentService HTTP/2 text chat. Token: ~/.config/cursor/auth.json. Tools not supported yet.",
     },
     ProviderProfile {
         id: "grok",
@@ -298,6 +300,9 @@ pub fn build_upstream_url(profile: &ProviderProfile, base_url: &str) -> String {
         UpstreamFormat::Antigravity => {
             // Full URL used by agy module; base kept for connection display.
             "https://cloudcode-pa.googleapis.com/v1internal:generateContent".into()
+        }
+        UpstreamFormat::CursorAgent => {
+            "https://agent.api5.cursor.sh/agent.v1.AgentService/Run".into()
         }
         UpstreamFormat::Stub => base.to_string(),
     }

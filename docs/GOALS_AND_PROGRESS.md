@@ -82,7 +82,7 @@ Legend: ✅ done · 🟨 partial · ❌ not started · 🚫 deferred
 7. [x] Antigravity `loadCodeAssist` + `generateContent` executor
 8. [x] Cursor OAuth **refresh** (`api2.cursor.sh/oauth/token`)
 9. [x] Claude subscription integration notes (`docs/CLAUDE_SUBSCRIPTION.md`)
-10. [ ] Cursor protobuf / AgentService **chat** executor
+10. [x] Cursor AgentService **text chat** (HTTP/2 Connect+proto; tools later)
 
 ### P1 — Protocol & cost
 

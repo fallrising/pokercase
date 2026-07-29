@@ -8,7 +8,7 @@ Personal subscription / free upstreams for **Layer A** (thinrouter).
 |----|---------|--------|--------|--------------|
 | `codex` | `cx` | **active** | OpenAI Responses | `https://chatgpt.com/backend-api/codex/responses` |
 | `claude` | `cc`, `anthropic` | **active** | Anthropic Messages | `https://api.anthropic.com/v1/messages` （订阅原理见 [CLAUDE_SUBSCRIPTION.md](./CLAUDE_SUBSCRIPTION.md)） |
-| `cursor` | `cu` | **partial** | Stub (import only; Connect/protobuf pending) | `https://api2.cursor.sh` |
+| `cursor` | `cu` | **active** | AgentService HTTP/2 Connect+proto (text) | `https://agent.api5.cursor.sh` |
 | `grok` | `xai`, `grok_cli` | **active** | OpenAI Responses | `https://cli-chat-proxy.grok.com/v1` |
 | `opencode` | `oc` | **active** | OpenAI Chat | `https://opencode.ai/zen/v1` |
 | `agy` | `ag`, `antigravity` | **active** | Antigravity generateContent | `https://cloudcode-pa.googleapis.com` |
@@ -90,7 +90,8 @@ export THINROUTER_AGY_CLIENT_ID='…'
 export THINROUTER_AGY_CLIENT_SECRET='…'
 ```
 
-**cursor** refresh: `POST https://api2.cursor.sh/oauth/token` with `grant_type=refresh_token` (implemented). Chat forward still needs Connect/protobuf executor.
+**cursor** refresh: `POST https://api2.cursor.sh/oauth/token`.  
+**cursor** chat: AgentService `/agent.v1.AgentService/Run` over HTTP/2 (text-only; tools not supported).
 
 ### Local import
 
