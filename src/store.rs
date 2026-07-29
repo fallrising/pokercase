@@ -487,6 +487,38 @@ impl Store {
             .context("connection missing after upsert")
     }
 
+    pub fn update_oauth_tokens(
+        &self,
+        connection_id: &str,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        expires_at: Option<&str>,
+    ) -> Result<()> {
+        let enc_access = if access_token.is_empty() {
+            String::new()
+        } else {
+            self.enc_key(access_token)
+        };
+        let enc_refresh = refresh_token
+            .filter(|s| !s.is_empty())
+            .map(|s| self.enc_key(s));
+        let conn = self.conn.lock().unwrap();
+        if let Some(ref rt) = enc_refresh {
+            conn.execute(
+                "UPDATE oauth_credentials SET access_token = ?1, refresh_token = ?2,
+                 expires_at = COALESCE(?3, expires_at) WHERE connection_id = ?4",
+                params![enc_access, rt, expires_at, connection_id],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE oauth_credentials SET access_token = ?1,
+                 expires_at = COALESCE(?2, expires_at) WHERE connection_id = ?3",
+                params![enc_access, expires_at, connection_id],
+            )?;
+        }
+        Ok(())
+    }
+
     /// Create/update a connection backed by imported OAuth/session tokens (no API key).
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_oauth_connection(
@@ -505,7 +537,14 @@ impl Store {
     ) -> Result<ConnectionRow> {
         // Empty access_token allowed for free providers (e.g. opencode uses Bearer public).
         let now = Utc::now().to_rfc3339();
-        let id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        // Prefer explicit id, else existing connection with same name, else new.
+        let id = if let Some(id) = id {
+            id
+        } else if let Some(existing) = self.get_connection_by_name(name)? {
+            existing.id
+        } else {
+            Uuid::new_v4().to_string()
+        };
         let enc_access = if access_token.trim().is_empty() {
             String::new()
         } else {

@@ -45,6 +45,11 @@ pub fn router() -> Router<AppState> {
             post(import_oauth_connection),
         )
         .route("/admin/api/providers", get(list_providers))
+        .route("/admin/api/connections/oauth/refresh-all", post(refresh_all_oauth))
+        .route(
+            "/admin/api/connections/{id}/refresh",
+            post(refresh_one_oauth),
+        )
 }
 
 fn check_admin(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
@@ -463,6 +468,35 @@ async fn list_providers(
 ) -> AppResult<Json<Value>> {
     check_admin(&state, &headers)?;
     Ok(Json(crate::providers::list_public()))
+}
+
+async fn refresh_all_oauth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    let rows = crate::local_import::refresh_all_oauth(&state.store)
+        .await
+        .map_err(AppError::Internal)?;
+    let data: Vec<Value> = rows
+        .into_iter()
+        .map(|(name, ok, detail)| json!({"name": name, "ok": ok, "detail": detail}))
+        .collect();
+    Ok(Json(json!({ "data": data })))
+}
+
+async fn refresh_one_oauth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    let conn = state
+        .store
+        .get_connection(&id)?
+        .ok_or_else(|| AppError::NotFound("connection not found".into()))?;
+    let row = crate::oauth_refresh::refresh_connection(&state.store, &conn).await?;
+    Ok(Json(json!({ "connection": ConnectionPublic::from(row) })))
 }
 
 async fn import_oauth_connection(

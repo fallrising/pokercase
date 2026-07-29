@@ -107,6 +107,31 @@ pub async fn forward_chat_completions(
     stream: bool,
     cancel: &CancellationToken,
 ) -> Result<ForwardOk, UpstreamAttemptError> {
+    forward_chat_completions_inner(state, target, body, stream, cancel, true).await
+}
+
+async fn forward_chat_completions_inner(
+    state: &ProxyState,
+    target: &ResolvedTarget,
+    body: Bytes,
+    stream: bool,
+    cancel: &CancellationToken,
+    allow_401_refresh: bool,
+) -> Result<ForwardOk, UpstreamAttemptError> {
+    // Refresh OAuth if near expiry (best-effort).
+    let target = {
+        let mut t = target.clone();
+        if allow_401_refresh && t.connection.auth_type == "oauth_import" {
+            if let Ok(fresh) =
+                crate::oauth_refresh::ensure_fresh(&state.store, t.connection.clone()).await
+            {
+                t.connection = fresh;
+            }
+        }
+        t
+    };
+    let target = &target;
+
     let provider_key = provider_id_for(target);
     let profile = provider_key.as_deref().and_then(providers::resolve);
 
@@ -278,6 +303,31 @@ pub async fn forward_chat_completions(
                     response: resp,
                     body_kind,
                     reassemble_stream: reassemble,
+                })
+            } else if status == 401
+                && allow_401_refresh
+                && target.connection.auth_type == "oauth_import"
+            {
+                let body_txt = resp.text().await.unwrap_or_default();
+                if let Ok(fresh) =
+                    crate::oauth_refresh::refresh_connection(&state.store, &target.connection).await
+                {
+                    let mut retry_target = target.clone();
+                    retry_target.connection = fresh;
+                    return Box::pin(forward_chat_completions_inner(
+                        state,
+                        &retry_target,
+                        body,
+                        stream,
+                        cancel,
+                        false,
+                    ))
+                    .await;
+                }
+                Err(UpstreamAttemptError {
+                    status,
+                    body: body_txt,
+                    retryable: is_retryable_status(status),
                 })
             } else {
                 let body = resp.text().await.unwrap_or_default();

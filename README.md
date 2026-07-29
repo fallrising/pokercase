@@ -62,6 +62,9 @@ thinrouter serve --host 127.0.0.1 --port 20128
 thinrouter serve --data-dir ./data --admin-token secret --secrets-key passphrase
 thinrouter doctor
 thinrouter tui
+# Import personal subscription tokens from local agent CLIs + refresh:
+thinrouter import-local --routes --refresh
+thinrouter refresh
 ```
 
 | Flag / env | Purpose |

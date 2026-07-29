@@ -74,4 +74,39 @@ When you need one of these: open an item, implement `ProviderProfile` + forward 
 | opencode | Chat Completions passthrough (+ `x-opencode-client`) |
 | cursor / agy | Import only until executors land |
 
-Token refresh (OAuth refresh_token) is **not** automated yet — re-import when expired.
+### Token refresh
+
+Automated for **codex / claude / grok**, and **agy** when Google OAuth client env is set:
+
+- On request: refresh if `expires_at` is within 5 minutes  
+- On upstream **401**: one refresh + retry  
+- CLI: `thinrouter refresh` or `thinrouter import-local --refresh`  
+- API: `POST /admin/api/connections/{id}/refresh`, `POST /admin/api/connections/oauth/refresh-all`
+
+**agy refresh env** (not stored in git — use Antigravity IDE / 9router public client):
+
+```bash
+export THINROUTER_AGY_CLIENT_ID='…'
+export THINROUTER_AGY_CLIENT_SECRET='…'
+```
+
+**cursor** refresh is not implemented yet.
+
+### Local import
+
+```bash
+thinrouter import-local --routes --refresh
+```
+
+Reads:
+
+| Provider | Path |
+|----------|------|
+| codex | `~/.codex/auth.json` (+ model from `config.toml`) |
+| claude | `~/.claude/.credentials.json` |
+| grok | `~/.grok/auth.json` |
+| cursor | `~/.config/cursor/auth.json` |
+| opencode | free (no file) |
+| agy | `~/.gemini/antigravity-cli/antigravity-oauth-token` |
+
+Creates connections `local-*` and routes `rt-*`.

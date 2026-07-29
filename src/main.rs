@@ -5,6 +5,8 @@ mod config;
 mod cooldown;
 mod error;
 mod http_client;
+mod local_import;
+mod oauth_refresh;
 mod providers;
 mod proxy;
 mod resolve;
@@ -62,6 +64,26 @@ enum Commands {
         secrets_key: Option<String>,
     },
     Tui {
+        #[arg(long, env = "THINROUTER_DATA_DIR")]
+        data_dir: Option<std::path::PathBuf>,
+        #[arg(long, env = "THINROUTER_SECRETS_KEY")]
+        secrets_key: Option<String>,
+    },
+    /// Import tokens from local agent CLIs (codex/claude/grok/cursor/opencode/agy)
+    ImportLocal {
+        #[arg(long, env = "THINROUTER_DATA_DIR")]
+        data_dir: Option<std::path::PathBuf>,
+        #[arg(long, env = "THINROUTER_SECRETS_KEY")]
+        secrets_key: Option<String>,
+        /// Also create routes rt-<provider> for each import
+        #[arg(long, default_value_t = true)]
+        routes: bool,
+        /// After import, try OAuth refresh for each connection
+        #[arg(long, default_value_t = true)]
+        refresh: bool,
+    },
+    /// Refresh OAuth tokens for imported connections
+    Refresh {
         #[arg(long, env = "THINROUTER_DATA_DIR")]
         data_dir: Option<std::path::PathBuf>,
         #[arg(long, env = "THINROUTER_SECRETS_KEY")]
@@ -133,7 +155,85 @@ async fn main() -> Result<()> {
             )?;
             tui_app::run_tui(&cfg)
         }
+        Commands::ImportLocal {
+            data_dir,
+            secrets_key,
+            routes,
+            refresh,
+        } => {
+            let cfg = AppConfig::new(
+                "127.0.0.1".into(),
+                20128,
+                data_dir,
+                None,
+                secrets_key,
+                None,
+                None,
+                None,
+            )?;
+            import_local_cmd(&cfg, routes, refresh).await
+        }
+        Commands::Refresh {
+            data_dir,
+            secrets_key,
+        } => {
+            let cfg = AppConfig::new(
+                "127.0.0.1".into(),
+                20128,
+                data_dir,
+                None,
+                secrets_key,
+                None,
+                None,
+                None,
+            )?;
+            refresh_cmd(&cfg).await
+        }
     }
+}
+
+async fn import_local_cmd(cfg: &AppConfig, routes: bool, refresh: bool) -> Result<()> {
+    let store = store::Store::open(&cfg.db_path(), cfg.secrets_key.clone())?;
+    println!("thinrouter import-local");
+    println!("  data_dir: {}", cfg.data_dir.display());
+    let results = local_import::import_all_local(&store, routes)?;
+    for r in &results {
+        println!(
+            "  {:8} {:14} {} — {}",
+            r.provider,
+            r.name,
+            if r.ok { "OK  " } else { "FAIL" },
+            r.detail
+        );
+    }
+    if refresh {
+        println!("  refreshing oauth…");
+        for (name, ok, detail) in local_import::refresh_all_oauth(&store).await? {
+            println!(
+                "  refresh {:14} {} — {}",
+                name,
+                if ok { "OK  " } else { "FAIL" },
+                detail.chars().take(120).collect::<String>()
+            );
+        }
+    }
+    println!("ok");
+    Ok(())
+}
+
+async fn refresh_cmd(cfg: &AppConfig) -> Result<()> {
+    let store = store::Store::open(&cfg.db_path(), cfg.secrets_key.clone())?;
+    println!("thinrouter refresh");
+    for (name, ok, detail) in local_import::refresh_all_oauth(&store).await? {
+        println!(
+            "  {:14} {} — {}",
+            name,
+            if ok { "OK  " } else { "FAIL" },
+            detail.chars().take(160).collect::<String>()
+        );
+    }
+    println!("ok");
+    Ok(())
 }
 
 fn doctor(cfg: &AppConfig) -> Result<()> {
