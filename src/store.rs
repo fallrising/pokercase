@@ -503,12 +503,14 @@ impl Store {
         priority: i64,
         enabled: bool,
     ) -> Result<ConnectionRow> {
-        if access_token.trim().is_empty() {
-            anyhow::bail!("access_token is required");
-        }
+        // Empty access_token allowed for free providers (e.g. opencode uses Bearer public).
         let now = Utc::now().to_rfc3339();
         let id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        let enc_access = self.enc_key(access_token);
+        let enc_access = if access_token.trim().is_empty() {
+            String::new()
+        } else {
+            self.enc_key(access_token)
+        };
         let enc_refresh = refresh_token
             .filter(|s| !s.is_empty())
             .map(|s| self.enc_key(s));

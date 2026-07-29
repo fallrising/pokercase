@@ -87,6 +87,8 @@ pub enum UpstreamBodyKind {
 pub struct ForwardOk {
     pub response: reqwest::Response,
     pub body_kind: UpstreamBodyKind,
+    /// Upstream forced streaming while client asked non-stream — reassemble body.
+    pub reassemble_stream: bool,
 }
 
 fn provider_id_for(target: &ResolvedTarget) -> Option<String> {
@@ -121,69 +123,99 @@ pub async fn forward_chat_completions(
         }
     }
 
-    let (url, wire_body, body_kind, extra_headers, auth) = if let Some(p) = profile {
-        let url = providers::build_upstream_url(p, &target.connection.base_url);
-        let prepared = match rewrite_model(&body, &target.upstream_model) {
-            Ok(b) => b,
-            Err(e) => {
-                return Err(UpstreamAttemptError {
-                    status: 400,
-                    body: e.to_string(),
-                    retryable: false,
-                });
-            }
-        };
-        let (wire, kind) = match p.format {
-            UpstreamFormat::OpenAiChat => (prepared, UpstreamBodyKind::OpenAiChat),
-            UpstreamFormat::OpenAiResponses => {
-                match responses::chat_to_responses_request(&prepared) {
-                    Ok(b) => (b, UpstreamBodyKind::OpenAiResponses),
-                    Err(e) => {
-                        return Err(UpstreamAttemptError {
-                            status: 400,
-                            body: e.to_string(),
-                            retryable: false,
-                        });
+    let client_stream = stream;
+    let (url, wire_body, body_kind, extra_headers, auth, upstream_stream, reassemble) =
+        if let Some(p) = profile {
+            let url = providers::build_upstream_url(p, &target.connection.base_url);
+            let prepared = match rewrite_model(&body, &target.upstream_model) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(UpstreamAttemptError {
+                        status: 400,
+                        body: e.to_string(),
+                        retryable: false,
+                    });
+                }
+            };
+            let force = p.force_stream && !client_stream;
+            let prepared = if force {
+                force_json_stream_true(&prepared).unwrap_or(prepared)
+            } else {
+                prepared
+            };
+            let (wire, kind) = match p.format {
+                UpstreamFormat::OpenAiChat => (prepared, UpstreamBodyKind::OpenAiChat),
+                UpstreamFormat::OpenAiResponses => {
+                    match responses::chat_to_responses_request(&prepared) {
+                        Ok(b) => {
+                            let b = if force {
+                                force_json_stream_true(&b).unwrap_or(b)
+                            } else {
+                                b
+                            };
+                            (b, UpstreamBodyKind::OpenAiResponses)
+                        }
+                        Err(e) => {
+                            return Err(UpstreamAttemptError {
+                                status: 400,
+                                body: e.to_string(),
+                                retryable: false,
+                            });
+                        }
                     }
                 }
-            }
-            UpstreamFormat::AnthropicMessages => {
-                match claude::openai_to_anthropic_request(&prepared) {
-                    Ok(b) => (b, UpstreamBodyKind::Anthropic),
-                    Err(e) => {
-                        return Err(UpstreamAttemptError {
-                            status: 400,
-                            body: e.to_string(),
-                            retryable: false,
-                        });
+                UpstreamFormat::AnthropicMessages => {
+                    match claude::openai_to_anthropic_request(&prepared) {
+                        Ok(b) => (b, UpstreamBodyKind::Anthropic),
+                        Err(e) => {
+                            return Err(UpstreamAttemptError {
+                                status: 400,
+                                body: e.to_string(),
+                                retryable: false,
+                            });
+                        }
                     }
                 }
-            }
-            UpstreamFormat::Stub => unreachable!(),
-        };
-        let auth = providers::authorization_header(p, target.connection.bearer_token());
-        (url, wire, kind, p.extra_headers, auth)
-    } else {
-        // Generic OpenAI-compatible connection
-        let base = target.connection.base_url.trim_end_matches('/');
-        let url = if base.ends_with("/chat/completions") {
-            base.to_string()
+                UpstreamFormat::Stub => unreachable!(),
+            };
+            let auth = providers::authorization_header(p, target.connection.bearer_token());
+            (
+                url,
+                wire,
+                kind,
+                p.extra_headers,
+                auth,
+                client_stream || force,
+                force,
+            )
         } else {
-            format!("{base}/chat/completions")
+            let base = target.connection.base_url.trim_end_matches('/');
+            let url = if base.ends_with("/chat/completions") {
+                base.to_string()
+            } else {
+                format!("{base}/chat/completions")
+            };
+            let wire = match rewrite_model(&body, &target.upstream_model) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(UpstreamAttemptError {
+                        status: 400,
+                        body: e.to_string(),
+                        retryable: false,
+                    });
+                }
+            };
+            let auth = Some(format!("Bearer {}", target.connection.bearer_token()));
+            (
+                url,
+                wire,
+                UpstreamBodyKind::OpenAiChat,
+                &[][..],
+                auth,
+                client_stream,
+                false,
+            )
         };
-        let wire = match rewrite_model(&body, &target.upstream_model) {
-            Ok(b) => b,
-            Err(e) => {
-                return Err(UpstreamAttemptError {
-                    status: 400,
-                    body: e.to_string(),
-                    retryable: false,
-                });
-            }
-        };
-        let auth = Some(format!("Bearer {}", target.connection.bearer_token()));
-        (url, wire, UpstreamBodyKind::OpenAiChat, &[][..], auth)
-    };
 
     debug!(
         url = %url,
@@ -205,9 +237,23 @@ pub async fn forward_chat_completions(
         req = req.header("authorization", a);
     }
     for (k, v) in extra_headers {
+        // Skip empty placeholders (e.g. chatgpt-account-id filled from meta below).
+        if v.is_empty() {
+            continue;
+        }
         req = req.header(*k, *v);
     }
-    if stream {
+    // Codex ChatGPT accounts often need chatgpt-account-id header from import meta.
+    if let Some(meta) = target.connection.oauth.as_ref().and_then(|o| o.meta.as_deref()) {
+        if let Ok(m) = serde_json::from_str::<serde_json::Value>(meta) {
+            if let Some(aid) = m.get("account_id").and_then(|a| a.as_str()) {
+                if !aid.is_empty() {
+                    req = req.header("ChatGPT-Account-Id", aid);
+                }
+            }
+        }
+    }
+    if upstream_stream {
         req = req.header("accept", "text/event-stream");
     }
 
@@ -231,6 +277,7 @@ pub async fn forward_chat_completions(
                 Ok(ForwardOk {
                     response: resp,
                     body_kind,
+                    reassemble_stream: reassemble,
                 })
             } else {
                 let body = resp.text().await.unwrap_or_default();
@@ -249,12 +296,72 @@ pub async fn forward_chat_completions(
     }
 }
 
+fn force_json_stream_true(body: &Bytes) -> AppResult<Bytes> {
+    let mut v: Value = serde_json::from_slice(body)
+        .map_err(|e| AppError::BadRequest(format!("invalid JSON: {e}")))?;
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("stream".into(), Value::Bool(true));
+    }
+    Ok(Bytes::from(serde_json::to_vec(&v)?))
+}
+
 fn convert_upstream_to_chat(bytes: Bytes, kind: UpstreamBodyKind) -> AppResult<Bytes> {
     match kind {
         UpstreamBodyKind::OpenAiChat => Ok(bytes),
         UpstreamBodyKind::OpenAiResponses => responses::responses_body_to_chat(&bytes),
         UpstreamBodyKind::Anthropic => claude::anthropic_to_openai_response(&bytes),
     }
+}
+
+/// Collect Responses SSE text deltas into a synthetic Responses JSON body.
+fn reassemble_responses_sse(raw: &str) -> Bytes {
+    let mut text = String::new();
+    let mut model = "unknown".to_string();
+    for line in raw.lines() {
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        if let Some(m) = v.pointer("/response/model").and_then(|m| m.as_str()) {
+            model = m.to_string();
+        }
+        if let Some(m) = v.get("model").and_then(|m| m.as_str()) {
+            model = m.to_string();
+        }
+        // response.output_text.delta
+        if let Some(d) = v.get("delta").and_then(|d| d.as_str()) {
+            text.push_str(d);
+        }
+        if let Some(d) = v.pointer("/delta/text").and_then(|d| d.as_str()) {
+            text.push_str(d);
+        }
+        // sometimes nested
+        if v.get("type").and_then(|t| t.as_str()) == Some("response.output_text.delta") {
+            if let Some(d) = v.get("delta").and_then(|d| d.as_str()) {
+                // already added
+                let _ = d;
+            }
+        }
+    }
+    let body = serde_json::json!({
+        "id": "resp_reassembled",
+        "object": "response",
+        "model": model,
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text}]
+        }],
+        "usage": {"input_tokens": 0, "output_tokens": 0}
+    });
+    Bytes::from(serde_json::to_vec(&body).unwrap_or_default())
 }
 
 /// Order targets: skip cooled; apply round-robin rotation when strategy is round_robin.
@@ -314,7 +421,7 @@ pub async fn handle_chat_with_fallback(
             Ok(fwd) => {
                 let latency = start.elapsed().as_millis() as i64;
                 state.cooldown.clear(&target.connection.id);
-                if stream {
+                if stream && !fwd.reassemble_stream {
                     let _ = state.store.log_usage(
                         Some(public_model),
                         Some(&target.connection.id),
@@ -326,11 +433,23 @@ pub async fn handle_chat_with_fallback(
                         None,
                     );
                     cancel_guard.disarm();
-                    // Stream format conversion for Responses/Anthropic is limited; passthrough bytes.
-                    return stream_response(fwd.response, state.sse_stall_secs, StreamMode::Passthrough)
-                        .await;
+                    return stream_response(
+                        fwd.response,
+                        state.sse_stall_secs,
+                        StreamMode::Passthrough,
+                    )
+                    .await;
                 } else {
                     let bytes = read_bytes_cancel(fwd.response, &cancel).await?;
+                    let bytes = if fwd.reassemble_stream {
+                        let raw = String::from_utf8_lossy(&bytes);
+                        match fwd.body_kind {
+                            UpstreamBodyKind::OpenAiResponses => reassemble_responses_sse(&raw),
+                            _ => bytes,
+                        }
+                    } else {
+                        bytes
+                    };
                     let bytes = convert_upstream_to_chat(bytes, fwd.body_kind)?;
                     let (pt, ct) = extract_usage_tokens(&bytes);
                     let cost = estimate_cost(

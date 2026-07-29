@@ -61,12 +61,8 @@ pub fn chat_to_responses_request(body: &Bytes) -> AppResult<Bytes> {
     if let Some(s) = obj.get("stream") {
         o.insert("stream".into(), s.clone());
     }
-    if let Some(mt) = obj.get("max_tokens") {
-        o.insert("max_output_tokens".into(), mt.clone());
-    }
-    if let Some(t) = obj.get("temperature") {
-        o.insert("temperature".into(), t.clone());
-    }
+    // ChatGPT Codex rejects max_output_tokens / temperature on the codex endpoint;
+    // only pass tools through. (Grok CLI may accept more — strip conservatively for Codex path.)
     if let Some(tools) = obj.get("tools") {
         o.insert("tools".into(), tools.clone());
     }

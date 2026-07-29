@@ -71,6 +71,8 @@ pub struct ProviderProfile {
     pub default_model: Option<&'static str>,
     pub auth: AuthScheme,
     pub extra_headers: &'static [(&'static str, &'static str)],
+    /// Some upstreams (ChatGPT Codex) reject non-stream; force stream and reassemble.
+    pub force_stream: bool,
     pub notes: &'static str,
 }
 
@@ -101,14 +103,15 @@ pub const ACTIVE: &[ProviderProfile] = &[
         status: ProviderStatus::Active,
         default_base_url: "https://chatgpt.com/backend-api/codex/responses",
         format: UpstreamFormat::OpenAiResponses,
-        default_model: Some("gpt-5.3-codex"),
+        default_model: Some("gpt-5.6-sol"),
         auth: AuthScheme::Bearer,
         extra_headers: &[
             ("originator", "codex_cli_rs"),
             ("User-Agent", "codex_cli_rs/0.136.0"),
             ("OpenAI-Beta", "responses=experimental"),
         ],
-        notes: "Uses ChatGPT Codex Responses endpoint. Import access token from Codex CLI / ChatGPT session.",
+        force_stream: true,
+        notes: "Codex requires stream=true. Prefer gpt-5.6-sol (not *-codex). Token: ~/.codex/auth.json",
     },
     ProviderProfile {
         id: "claude",
@@ -130,7 +133,8 @@ pub const ACTIVE: &[ProviderProfile] = &[
             ("User-Agent", "claude-cli/2.1.92 (external, sdk-cli)"),
             ("X-App", "cli"),
         ],
-        notes: "Anthropic Messages + OAuth bearer. Import Claude Code CLI token.",
+        force_stream: false,
+        notes: "Anthropic Messages + OAuth bearer. Token: ~/.claude/.credentials.json",
     },
     ProviderProfile {
         id: "cursor",
@@ -146,7 +150,8 @@ pub const ACTIVE: &[ProviderProfile] = &[
             ("User-Agent", "connect-es/1.6.1"),
             ("connect-protocol-version", "1"),
         ],
-        notes: "Token import ready. Full Connect/protobuf AgentService executor is not wired yet — will develop when you need Cursor as upstream.",
+        force_stream: false,
+        notes: "Token import ready (~/.config/cursor/auth.json). Protobuf executor not wired yet.",
     },
     ProviderProfile {
         id: "grok",
@@ -159,10 +164,12 @@ pub const ACTIVE: &[ProviderProfile] = &[
         default_model: Some("grok-build"),
         auth: AuthScheme::Bearer,
         extra_headers: &[
-            ("User-Agent", "grok-shell/1.0 (linux; x86_64)"),
+            ("User-Agent", "grok-shell/0.2.114 (linux; x86_64)"),
             ("x-grok-client", "grok-shell"),
+            ("x-grok-client-version", "0.2.114"),
         ],
-        notes: "Grok CLI chat-proxy Responses API. Import Grok CLI / xAI session token.",
+        force_stream: false,
+        notes: "Grok CLI Responses API. Token: ~/.grok/auth.json",
     },
     ProviderProfile {
         id: "opencode",
@@ -172,10 +179,11 @@ pub const ACTIVE: &[ProviderProfile] = &[
         status: ProviderStatus::Active,
         default_base_url: "https://opencode.ai/zen/v1",
         format: UpstreamFormat::OpenAiChat,
-        default_model: None,
+        default_model: Some("big-pickle"),
         auth: AuthScheme::BearerOrPublic,
         extra_headers: &[("x-opencode-client", "desktop")],
-        notes: "Free OpenAI-compatible zen API. Token optional; uses Bearer public when empty.",
+        force_stream: false,
+        notes: "Free zen API. Token optional (Bearer public).",
     },
     ProviderProfile {
         id: "agy",
@@ -188,7 +196,8 @@ pub const ACTIVE: &[ProviderProfile] = &[
         default_model: Some("gemini-3-flash"),
         auth: AuthScheme::Bearer,
         extra_headers: &[("User-Agent", "antigravity/ide/1.0 darwin/arm64")],
-        notes: "Token import ready. Google generateContent / cloudcode envelope executor is not wired yet — develop when needed.",
+        force_stream: false,
+        notes: "Token: ~/.gemini/antigravity-cli/antigravity-oauth-token. Executor not wired yet.",
     },
 ];
 
