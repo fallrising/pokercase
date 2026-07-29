@@ -17,6 +17,15 @@ pub struct Store {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthCreds {
+    pub provider: String,
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_at: Option<String>,
+    pub meta: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionRow {
     pub id: String,
     pub name: String,
@@ -29,8 +38,25 @@ pub struct ConnectionRow {
     pub input_price_per_m: Option<f64>,
     /// USD per 1M output tokens.
     pub output_price_per_m: Option<f64>,
+    /// `api_key` | `oauth_import`
+    pub auth_type: String,
+    pub oauth: Option<OAuthCreds>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+impl ConnectionRow {
+    /// Bearer token for upstream Authorization header.
+    pub fn bearer_token(&self) -> &str {
+        if self.auth_type == "oauth_import" {
+            if let Some(o) = &self.oauth {
+                if !o.access_token.is_empty() {
+                    return o.access_token.as_str();
+                }
+            }
+        }
+        self.api_key.as_str()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,26 +70,51 @@ pub struct ConnectionPublic {
     pub enabled: bool,
     pub input_price_per_m: Option<f64>,
     pub output_price_per_m: Option<f64>,
+    pub auth_type: String,
+    pub provider: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
 
 impl From<ConnectionRow> for ConnectionPublic {
     fn from(c: ConnectionRow) -> Self {
+        let provider = c.oauth.as_ref().map(|o| o.provider.clone());
+        let masked = if c.auth_type == "oauth_import" {
+            c.oauth
+                .as_ref()
+                .map(|o| mask_secret(&o.access_token))
+                .unwrap_or_else(|| "oauth".into())
+        } else {
+            mask_secret(&c.api_key)
+        };
         Self {
             id: c.id,
             name: c.name,
             base_url: c.base_url,
-            api_key_masked: mask_secret(&c.api_key),
+            api_key_masked: masked,
             default_model: c.default_model,
             priority: c.priority,
             enabled: c.enabled,
             input_price_per_m: c.input_price_per_m,
             output_price_per_m: c.output_price_per_m,
+            auth_type: c.auth_type,
+            provider,
             created_at: c.created_at,
             updated_at: c.updated_at,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageDayRow {
+    pub day: String,
+    pub requests: i64,
+    pub ok: i64,
+    pub errors: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub estimated_cost_usd: f64,
+    pub avg_latency_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +193,9 @@ impl Store {
                 default_model TEXT,
                 priority INTEGER NOT NULL DEFAULT 100,
                 enabled INTEGER NOT NULL DEFAULT 1,
+                input_price_per_m REAL,
+                output_price_per_m REAL,
+                auth_type TEXT NOT NULL DEFAULT 'api_key',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -181,6 +235,16 @@ impl Store {
                 latency_ms INTEGER,
                 error TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS oauth_credentials (
+                connection_id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                access_token TEXT NOT NULL,
+                refresh_token TEXT,
+                expires_at TEXT,
+                meta TEXT,
+                FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE CASCADE
+            );
             "#,
         )?;
         // Additive columns for older DBs
@@ -190,6 +254,10 @@ impl Store {
         );
         let _ = conn.execute(
             "ALTER TABLE connections ADD COLUMN output_price_per_m REAL",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE connections ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'api_key'",
             [],
         );
         let _ = conn.execute(
@@ -227,8 +295,10 @@ impl Store {
         enabled: bool,
         input_price_per_m: Option<f64>,
         output_price_per_m: Option<f64>,
+        auth_type: String,
         created_at: String,
         updated_at: String,
+        oauth: Option<OAuthCreds>,
     ) -> ConnectionRow {
         ConnectionRow {
             id,
@@ -240,38 +310,85 @@ impl Store {
             enabled,
             input_price_per_m,
             output_price_per_m,
+            auth_type,
+            oauth: oauth.map(|mut o| {
+                o.access_token = self.dec_key(&o.access_token);
+                if let Some(r) = o.refresh_token.take() {
+                    o.refresh_token = Some(self.dec_key(&r));
+                }
+                o
+            }),
             created_at,
             updated_at,
         }
+    }
+
+    fn load_oauth_locked(conn: &Connection, connection_id: &str) -> Result<Option<OAuthCreds>> {
+        conn.query_row(
+            "SELECT provider, access_token, refresh_token, expires_at, meta
+             FROM oauth_credentials WHERE connection_id = ?1",
+            params![connection_id],
+            |row| {
+                Ok(OAuthCreds {
+                    provider: row.get(0)?,
+                    access_token: row.get(1)?,
+                    refresh_token: row.get(2)?,
+                    expires_at: row.get(3)?,
+                    meta: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    fn row_tuple(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<(
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        i64,
+        bool,
+        Option<f64>,
+        Option<f64>,
+        String,
+        String,
+        String,
+    )> {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, i64>(6)? != 0,
+            row.get::<_, Option<f64>>(7)?,
+            row.get::<_, Option<f64>>(8)?,
+            row.get::<_, Option<String>>(9)?
+                .unwrap_or_else(|| "api_key".into()),
+            row.get::<_, String>(10)?,
+            row.get::<_, String>(11)?,
+        ))
     }
 
     pub fn list_connections(&self) -> Result<Vec<ConnectionRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, name, base_url, api_key, default_model, priority, enabled,
-                    input_price_per_m, output_price_per_m, created_at, updated_at
+                    input_price_per_m, output_price_per_m, auth_type, created_at, updated_at
              FROM connections ORDER BY priority ASC, name ASC",
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, i64>(6)? != 0,
-                row.get::<_, Option<f64>>(7)?,
-                row.get::<_, Option<f64>>(8)?,
-                row.get::<_, String>(9)?,
-                row.get::<_, String>(10)?,
-            ))
-        })?;
+        let rows = stmt.query_map([], |row| Self::row_tuple(row))?;
         let mut out = Vec::new();
         for r in rows {
-            let (id, name, base_url, api_key, dm, pr, en, ip, op, ca, ua) = r?;
+            let (id, name, base_url, api_key, dm, pr, en, ip, op, at, ca, ua) = r?;
+            let oauth = Self::load_oauth_locked(&conn, &id)?;
             out.push(self.map_connection_row(
-                id, name, base_url, api_key, dm, pr, en, ip, op, ca, ua,
+                id, name, base_url, api_key, dm, pr, en, ip, op, at, ca, ua, oauth,
             ));
         }
         Ok(out)
@@ -282,29 +399,19 @@ impl Store {
         let row = conn
             .query_row(
                 "SELECT id, name, base_url, api_key, default_model, priority, enabled,
-                        input_price_per_m, output_price_per_m, created_at, updated_at
+                        input_price_per_m, output_price_per_m, auth_type, created_at, updated_at
                  FROM connections WHERE id = ?1",
                 params![id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, i64>(5)?,
-                        row.get::<_, i64>(6)? != 0,
-                        row.get::<_, Option<f64>>(7)?,
-                        row.get::<_, Option<f64>>(8)?,
-                        row.get::<_, String>(9)?,
-                        row.get::<_, String>(10)?,
-                    ))
-                },
+                |row| Self::row_tuple(row),
             )
             .optional()?;
-        Ok(row.map(|(id, name, base_url, api_key, dm, pr, en, ip, op, ca, ua)| {
-            self.map_connection_row(id, name, base_url, api_key, dm, pr, en, ip, op, ca, ua)
-        }))
+        let Some((id, name, base_url, api_key, dm, pr, en, ip, op, at, ca, ua)) = row else {
+            return Ok(None);
+        };
+        let oauth = Self::load_oauth_locked(&conn, &id)?;
+        Ok(Some(self.map_connection_row(
+            id, name, base_url, api_key, dm, pr, en, ip, op, at, ca, ua, oauth,
+        )))
     }
 
     pub fn get_connection_by_name(&self, name: &str) -> Result<Option<ConnectionRow>> {
@@ -312,29 +419,19 @@ impl Store {
         let row = conn
             .query_row(
                 "SELECT id, name, base_url, api_key, default_model, priority, enabled,
-                        input_price_per_m, output_price_per_m, created_at, updated_at
+                        input_price_per_m, output_price_per_m, auth_type, created_at, updated_at
                  FROM connections WHERE name = ?1",
                 params![name],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, i64>(5)?,
-                        row.get::<_, i64>(6)? != 0,
-                        row.get::<_, Option<f64>>(7)?,
-                        row.get::<_, Option<f64>>(8)?,
-                        row.get::<_, String>(9)?,
-                        row.get::<_, String>(10)?,
-                    ))
-                },
+                |row| Self::row_tuple(row),
             )
             .optional()?;
-        Ok(row.map(|(id, name, base_url, api_key, dm, pr, en, ip, op, ca, ua)| {
-            self.map_connection_row(id, name, base_url, api_key, dm, pr, en, ip, op, ca, ua)
-        }))
+        let Some((id, name, base_url, api_key, dm, pr, en, ip, op, at, ca, ua)) = row else {
+            return Ok(None);
+        };
+        let oauth = Self::load_oauth_locked(&conn, &id)?;
+        Ok(Some(self.map_connection_row(
+            id, name, base_url, api_key, dm, pr, en, ip, op, at, ca, ua, oauth,
+        )))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -360,8 +457,8 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO connections (id, name, base_url, api_key, default_model, priority, enabled,
-                                      input_price_per_m, output_price_per_m, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+                                      input_price_per_m, output_price_per_m, auth_type, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'api_key', ?10, ?10)
              ON CONFLICT(id) DO UPDATE SET
                name = excluded.name,
                base_url = excluded.base_url,
@@ -390,8 +487,85 @@ impl Store {
             .context("connection missing after upsert")
     }
 
+    /// Create/update a connection backed by imported OAuth/session tokens (no API key).
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_oauth_connection(
+        &self,
+        id: Option<String>,
+        name: &str,
+        base_url: &str,
+        provider: &str,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        expires_at: Option<&str>,
+        meta: Option<&str>,
+        default_model: Option<&str>,
+        priority: i64,
+        enabled: bool,
+    ) -> Result<ConnectionRow> {
+        if access_token.trim().is_empty() {
+            anyhow::bail!("access_token is required");
+        }
+        let now = Utc::now().to_rfc3339();
+        let id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let enc_access = self.enc_key(access_token);
+        let enc_refresh = refresh_token
+            .filter(|s| !s.is_empty())
+            .map(|s| self.enc_key(s));
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO connections (id, name, base_url, api_key, default_model, priority, enabled,
+                                      input_price_per_m, output_price_per_m, auth_type, created_at, updated_at)
+             VALUES (?1, ?2, ?3, '', ?4, ?5, ?6, NULL, NULL, 'oauth_import', ?7, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+               name = excluded.name,
+               base_url = excluded.base_url,
+               default_model = excluded.default_model,
+               priority = excluded.priority,
+               enabled = excluded.enabled,
+               auth_type = 'oauth_import',
+               updated_at = excluded.updated_at",
+            params![
+                id,
+                name,
+                base_url.trim_end_matches('/'),
+                default_model,
+                priority,
+                enabled as i64,
+                now
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO oauth_credentials (connection_id, provider, access_token, refresh_token, expires_at, meta)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(connection_id) DO UPDATE SET
+               provider = excluded.provider,
+               access_token = excluded.access_token,
+               refresh_token = COALESCE(excluded.refresh_token, oauth_credentials.refresh_token),
+               expires_at = excluded.expires_at,
+               meta = excluded.meta",
+            params![
+                id,
+                provider,
+                enc_access,
+                enc_refresh,
+                expires_at,
+                meta
+            ],
+        )?;
+        tx.commit()?;
+        drop(conn);
+        self.get_connection(&id)?
+            .context("oauth connection missing after upsert")
+    }
+
     pub fn delete_connection(&self, id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "DELETE FROM oauth_credentials WHERE connection_id = ?1",
+            params![id],
+        );
         let n = conn.execute("DELETE FROM connections WHERE id = ?1", params![id])?;
         Ok(n > 0)
     }
@@ -699,6 +873,76 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok(total.unwrap_or(0.0))
+    }
+
+    /// Daily aggregates (most recent `days` day buckets by RFC3339 date prefix).
+    pub fn usage_by_day(&self, days: i64) -> Result<Vec<UsageDayRow>> {
+        let days = days.clamp(1, 366);
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT substr(ts, 1, 10) AS day,
+                    COUNT(*) AS requests,
+                    SUM(CASE WHEN status = 200 THEN 1 ELSE 0 END) AS ok,
+                    SUM(CASE WHEN status IS NULL OR status != 200 THEN 1 ELSE 0 END) AS errors,
+                    COALESCE(SUM(prompt_tokens), 0),
+                    COALESCE(SUM(completion_tokens), 0),
+                    COALESCE(SUM(estimated_cost_usd), 0),
+                    COALESCE(AVG(latency_ms), 0)
+             FROM usage_events
+             GROUP BY day
+             ORDER BY day DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![days], |row| {
+            Ok(UsageDayRow {
+                day: row.get(0)?,
+                requests: row.get(1)?,
+                ok: row.get(2)?,
+                errors: row.get(3)?,
+                prompt_tokens: row.get(4)?,
+                completion_tokens: row.get(5)?,
+                estimated_cost_usd: row.get(6)?,
+                avg_latency_ms: row.get(7)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// CSV export of recent usage events.
+    pub fn usage_csv(&self, limit: i64) -> Result<String> {
+        let events = self.recent_usage(limit)?;
+        let mut out = String::from(
+            "id,ts,public_model,connection_id,status,latency_ms,prompt_tokens,completion_tokens,estimated_cost_usd,error\n",
+        );
+        for e in events {
+            let err = e
+                .error
+                .unwrap_or_default()
+                .replace('"', "'")
+                .replace('\n', " ");
+            out.push_str(&format!(
+                "{},{},{},{},{},{},{},{},{},\"{}\"\n",
+                e.id,
+                e.ts,
+                e.public_model.unwrap_or_default(),
+                e.connection_id.unwrap_or_default(),
+                e.status.map(|s| s.to_string()).unwrap_or_default(),
+                e.latency_ms.map(|s| s.to_string()).unwrap_or_default(),
+                e.prompt_tokens.map(|s| s.to_string()).unwrap_or_default(),
+                e.completion_tokens
+                    .map(|s| s.to_string())
+                    .unwrap_or_default(),
+                e.estimated_cost_usd
+                    .map(|s| s.to_string())
+                    .unwrap_or_default(),
+                err
+            ));
+        }
+        Ok(out)
     }
 
     pub fn stats(&self) -> Result<serde_json::Value> {

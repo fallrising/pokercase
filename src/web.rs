@@ -637,6 +637,10 @@ async fn usage_page(
         .store
         .recent_usage(50)
         .map_err(|e| AppError::Internal(e).into_response())?;
+    let daily = state
+        .store
+        .usage_by_day(14)
+        .map_err(|e| AppError::Internal(e).into_response())?;
     let cost_total = state
         .store
         .usage_cost_total()
@@ -647,6 +651,7 @@ async fn usage_page(
             title => "Usage",
             active => "usage",
             events => events,
+            daily => daily,
             cost_total => format!("{cost_total:.6}"),
             admin_protected => state.cfg.admin_token.is_some(),
         },

@@ -13,9 +13,14 @@ pub struct AppConfig {
     pub secrets_key: Option<String>,
     /// Max idle time between SSE chunks before aborting (seconds).
     pub sse_stall_secs: u64,
+    /// Enable token-saver rewrite (tool_result truncation).
+    pub token_saver: bool,
+    /// Max chars kept per tool-like content block.
+    pub token_saver_max_chars: usize,
 }
 
 impl AppConfig {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         host: String,
         port: u16,
@@ -23,6 +28,8 @@ impl AppConfig {
         admin_token: Option<String>,
         secrets_key: Option<String>,
         sse_stall_secs: Option<u64>,
+        token_saver: Option<bool>,
+        token_saver_max_chars: Option<usize>,
     ) -> Result<Self> {
         let data_dir = match data_dir {
             Some(p) => p,
@@ -44,6 +51,8 @@ impl AppConfig {
             admin_token,
             secrets_key: secrets_key.filter(|s| !s.is_empty()),
             sse_stall_secs: sse_stall_secs.unwrap_or(90),
+            token_saver: token_saver.unwrap_or(false),
+            token_saver_max_chars: token_saver_max_chars.unwrap_or(2_000),
         })
     }
 

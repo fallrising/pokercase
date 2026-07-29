@@ -1,14 +1,18 @@
 mod admin;
+mod cancel;
 mod claude;
 mod config;
 mod cooldown;
 mod error;
+mod http_client;
 mod proxy;
 mod resolve;
+mod responses;
 mod secrets;
 mod server;
 mod store;
 mod templates;
+mod token_saver;
 mod tui_app;
 mod web;
 
@@ -32,33 +36,30 @@ struct Cli {
 enum Commands {
     /// Start HTTP proxy + web admin
     Serve {
-        /// Bind address
         #[arg(long, env = "THINROUTER_HOST", default_value = "127.0.0.1")]
         host: String,
-        /// Bind port
         #[arg(long, env = "THINROUTER_PORT", default_value_t = 20128)]
         port: u16,
-        /// Data directory (SQLite, etc.)
         #[arg(long, env = "THINROUTER_DATA_DIR")]
         data_dir: Option<std::path::PathBuf>,
-        /// Optional admin token for /admin (UI login + x-admin-token / cookie)
         #[arg(long, env = "THINROUTER_ADMIN_TOKEN")]
         admin_token: Option<String>,
-        /// Optional passphrase to encrypt connection API keys at rest
         #[arg(long, env = "THINROUTER_SECRETS_KEY")]
         secrets_key: Option<String>,
-        /// SSE stall timeout in seconds (abort stream if no chunk)
         #[arg(long, env = "THINROUTER_SSE_STALL_SECS", default_value_t = 90)]
         sse_stall_secs: u64,
+        /// Enable token-saver (truncate tool / huge message content)
+        #[arg(long, env = "THINROUTER_TOKEN_SAVER", default_value_t = false)]
+        token_saver: bool,
+        #[arg(long, env = "THINROUTER_TOKEN_SAVER_MAX_CHARS", default_value_t = 2000)]
+        token_saver_max_chars: usize,
     },
-    /// Print paths and basic status
     Doctor {
         #[arg(long, env = "THINROUTER_DATA_DIR")]
         data_dir: Option<std::path::PathBuf>,
         #[arg(long, env = "THINROUTER_SECRETS_KEY")]
         secrets_key: Option<String>,
     },
-    /// Terminal UI for connections / routes / usage
     Tui {
         #[arg(long, env = "THINROUTER_DATA_DIR")]
         data_dir: Option<std::path::PathBuf>,
@@ -84,6 +85,8 @@ async fn main() -> Result<()> {
             admin_token,
             secrets_key,
             sse_stall_secs,
+            token_saver,
+            token_saver_max_chars,
         } => {
             let cfg = AppConfig::new(
                 host,
@@ -92,6 +95,8 @@ async fn main() -> Result<()> {
                 admin_token,
                 secrets_key,
                 Some(sse_stall_secs),
+                Some(token_saver),
+                Some(token_saver_max_chars),
             )?;
             server::run(cfg).await
         }
@@ -99,14 +104,32 @@ async fn main() -> Result<()> {
             data_dir,
             secrets_key,
         } => {
-            let cfg = AppConfig::new("127.0.0.1".into(), 20128, data_dir, None, secrets_key, None)?;
+            let cfg = AppConfig::new(
+                "127.0.0.1".into(),
+                20128,
+                data_dir,
+                None,
+                secrets_key,
+                None,
+                None,
+                None,
+            )?;
             doctor(&cfg)
         }
         Commands::Tui {
             data_dir,
             secrets_key,
         } => {
-            let cfg = AppConfig::new("127.0.0.1".into(), 20128, data_dir, None, secrets_key, None)?;
+            let cfg = AppConfig::new(
+                "127.0.0.1".into(),
+                20128,
+                data_dir,
+                None,
+                secrets_key,
+                None,
+                None,
+                None,
+            )?;
             tui_app::run_tui(&cfg)
         }
     }
@@ -115,7 +138,7 @@ async fn main() -> Result<()> {
 fn doctor(cfg: &AppConfig) -> Result<()> {
     println!("thinrouter doctor");
     println!("  crate    : thinrouter");
-    println!("  repo     : fallrising/pokercase (working name: thinrouter)");
+    println!("  repo     : fallrising/pokercase");
     println!("  data_dir : {}", cfg.data_dir.display());
     println!("  db_path  : {}", cfg.db_path().display());
     println!(
@@ -123,15 +146,16 @@ fn doctor(cfg: &AppConfig) -> Result<()> {
         if cfg.secrets_key.is_some() {
             "encryption enabled"
         } else {
-            "plaintext api keys"
+            "plaintext secrets"
         }
     );
     let store = store::Store::open(&cfg.db_path(), cfg.secrets_key.clone())?;
     let conns = store.list_connections()?;
+    let oauth_n = conns.iter().filter(|c| c.auth_type == "oauth_import").count();
     let routes = store.list_routes()?;
     let keys = store.list_api_keys()?;
     let cost = store.usage_cost_total()?;
-    println!("  connections: {}", conns.len());
+    println!("  connections: {} (oauth_import: {oauth_n})", conns.len());
     println!("  routes     : {}", routes.len());
     println!("  api_keys   : {}", keys.len());
     println!("  est. cost  : ${cost:.6}");

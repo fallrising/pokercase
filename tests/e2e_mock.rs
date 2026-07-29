@@ -195,6 +195,22 @@ async fn e2e_nonstream_stream_anthropic_fallback() {
     assert_eq!(body["type"], "message");
     assert_eq!(body["content"][0]["text"], "hello from mock");
 
+    // OpenAI Responses API
+    let resp = client
+        .post(format!("{base}/v1/responses"))
+        .json(&json!({
+            "model": "cheap",
+            "input": "hi",
+            "max_output_tokens": 32
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["object"], "response");
+    assert_eq!(body["output"][0]["content"][0]["text"], "hello from mock");
+
     // fallback: dead then mock
     let bad: Value = client
         .post(format!("{base}/admin/api/connections"))

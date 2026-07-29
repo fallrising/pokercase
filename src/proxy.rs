@@ -10,12 +10,15 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
 use tokio::time::{timeout, Duration};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::claude::{self, StreamTranslateState};
 use crate::cooldown::{cooldown_secs_for_status, CooldownMap};
 use crate::error::{AppError, AppResult};
+use crate::responses;
 use crate::store::{ResolvedTarget, Store};
+use crate::token_saver;
 
 #[derive(Clone)]
 pub struct ProxyState {
@@ -25,6 +28,8 @@ pub struct ProxyState {
     /// Global counter for round-robin start offsets.
     pub rr_counter: Arc<AtomicU64>,
     pub sse_stall_secs: u64,
+    pub token_saver: bool,
+    pub token_saver_max_chars: usize,
 }
 
 #[derive(Debug)]
@@ -81,6 +86,7 @@ pub async fn forward_chat_completions(
     target: &ResolvedTarget,
     body: Bytes,
     stream: bool,
+    cancel: &CancellationToken,
 ) -> Result<reqwest::Response, UpstreamAttemptError> {
     let url = chat_completions_url(&target.connection.base_url);
     let rewritten = match rewrite_model(&body, &target.upstream_model) {
@@ -94,9 +100,11 @@ pub async fn forward_chat_completions(
         }
     };
 
+    let bearer = target.connection.bearer_token();
     debug!(
         url = %url,
         connection = %target.connection.name,
+        auth_type = %target.connection.auth_type,
         model = %target.upstream_model,
         stream,
         "forwarding chat completions"
@@ -106,17 +114,27 @@ pub async fn forward_chat_completions(
         .http
         .post(&url)
         .header("content-type", "application/json")
-        .header(
-            "authorization",
-            format!("Bearer {}", target.connection.api_key),
-        )
+        .header("authorization", format!("Bearer {bearer}"))
         .body(rewritten);
 
     if stream {
         req = req.header("accept", "text/event-stream");
     }
 
-    match req.send().await {
+    let send_fut = req.send();
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            return Err(UpstreamAttemptError {
+                status: 499,
+                body: "client disconnected".into(),
+                retryable: false,
+            });
+        }
+        r = send_fut => r,
+    };
+
+    match result {
         Ok(resp) => {
             let status = resp.status().as_u16();
             if status == 200 {
@@ -154,7 +172,6 @@ pub fn order_targets(
             active.push(t);
         }
     }
-    // Prefer non-cooled; if all cooled, still try them (last resort).
     let mut ordered = if active.is_empty() { cooled } else { active };
 
     if strategy.eq_ignore_ascii_case("round_robin") && ordered.len() > 1 {
@@ -165,7 +182,14 @@ pub fn order_targets(
     ordered
 }
 
+fn prepare_body(state: &ProxyState, body: Bytes) -> AppResult<Bytes> {
+    token_saver::maybe_rewrite(&body, state.token_saver, state.token_saver_max_chars)
+}
+
 /// Handle chat with ordered fallback. Stream fallback only before first byte committed.
+///
+/// `cancel_guard` is disarmed automatically before returning an SSE body so the stream
+/// is not aborted when the HTTP handler completes.
 pub async fn handle_chat_with_fallback(
     state: &ProxyState,
     public_model: &str,
@@ -173,13 +197,19 @@ pub async fn handle_chat_with_fallback(
     stream: bool,
     targets: Vec<ResolvedTarget>,
     strategy: &str,
+    cancel: CancellationToken,
+    cancel_guard: crate::cancel::CancelOnDrop,
 ) -> AppResult<Response> {
+    let body = prepare_body(state, body)?;
     let targets = order_targets(targets, strategy, &state.cooldown, &state.rr_counter);
     let mut last_err: Option<UpstreamAttemptError> = None;
 
     for (idx, target) in targets.iter().enumerate() {
+        if cancel.is_cancelled() {
+            return Err(AppError::BadRequest("client disconnected".into()));
+        }
         let start = Instant::now();
-        match forward_chat_completions(state, target, body.clone(), stream).await {
+        match forward_chat_completions(state, target, body.clone(), stream, &cancel).await {
             Ok(resp) => {
                 let latency = start.elapsed().as_millis() as i64;
                 state.cooldown.clear(&target.connection.id);
@@ -194,12 +224,11 @@ pub async fn handle_chat_with_fallback(
                         None,
                         None,
                     );
-                    return stream_response(resp, state.sse_stall_secs, None).await;
+                    cancel_guard.disarm();
+                    return stream_response(resp, state.sse_stall_secs, StreamMode::Passthrough)
+                        .await;
                 } else {
-                    let bytes = resp
-                        .bytes()
-                        .await
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("read upstream body: {e}")))?;
+                    let bytes = read_bytes_cancel(resp, &cancel).await?;
                     let (pt, ct) = extract_usage_tokens(&bytes);
                     let cost = estimate_cost(
                         pt,
@@ -272,14 +301,20 @@ pub async fn handle_anthropic_messages(
     stream: bool,
     targets: Vec<ResolvedTarget>,
     strategy: &str,
+    cancel: CancellationToken,
+    cancel_guard: crate::cancel::CancelOnDrop,
 ) -> AppResult<Response> {
+    let body = prepare_body(state, body)?;
     let oai_body = claude::anthropic_to_openai(&body)?;
     let targets = order_targets(targets, strategy, &state.cooldown, &state.rr_counter);
     let mut last_err: Option<UpstreamAttemptError> = None;
 
     for (idx, target) in targets.iter().enumerate() {
+        if cancel.is_cancelled() {
+            return Err(AppError::BadRequest("client disconnected".into()));
+        }
         let start = Instant::now();
-        match forward_chat_completions(state, target, oai_body.clone(), stream).await {
+        match forward_chat_completions(state, target, oai_body.clone(), stream, &cancel).await {
             Ok(resp) => {
                 let latency = start.elapsed().as_millis() as i64;
                 state.cooldown.clear(&target.connection.id);
@@ -294,17 +329,15 @@ pub async fn handle_anthropic_messages(
                         None,
                         None,
                     );
+                    cancel_guard.disarm();
                     return stream_response(
                         resp,
                         state.sse_stall_secs,
-                        Some(public_model.to_string()),
+                        StreamMode::Anthropic(public_model.to_string()),
                     )
                     .await;
                 } else {
-                    let bytes = resp
-                        .bytes()
-                        .await
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("read upstream body: {e}")))?;
+                    let bytes = read_bytes_cancel(resp, &cancel).await?;
                     let (pt, ct) = extract_usage_tokens(&bytes);
                     let cost = estimate_cost(
                         pt,
@@ -364,6 +397,116 @@ pub async fn handle_anthropic_messages(
     })
 }
 
+/// OpenAI Responses API path.
+pub async fn handle_responses(
+    state: &ProxyState,
+    public_model: &str,
+    body: Bytes,
+    stream: bool,
+    targets: Vec<ResolvedTarget>,
+    strategy: &str,
+    cancel: CancellationToken,
+    cancel_guard: crate::cancel::CancelOnDrop,
+) -> AppResult<Response> {
+    let body = prepare_body(state, body)?;
+    let chat_body = responses::responses_to_chat(&body)?;
+    let targets = order_targets(targets, strategy, &state.cooldown, &state.rr_counter);
+    let mut last_err: Option<UpstreamAttemptError> = None;
+
+    for (idx, target) in targets.iter().enumerate() {
+        if cancel.is_cancelled() {
+            return Err(AppError::BadRequest("client disconnected".into()));
+        }
+        let start = Instant::now();
+        match forward_chat_completions(state, target, chat_body.clone(), stream, &cancel).await {
+            Ok(resp) => {
+                let latency = start.elapsed().as_millis() as i64;
+                state.cooldown.clear(&target.connection.id);
+                if stream {
+                    let _ = state.store.log_usage(
+                        Some(public_model),
+                        Some(&target.connection.id),
+                        Some(200),
+                        Some(latency),
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
+                    cancel_guard.disarm();
+                    return stream_response(resp, state.sse_stall_secs, StreamMode::Responses).await;
+                } else {
+                    let bytes = read_bytes_cancel(resp, &cancel).await?;
+                    let (pt, ct) = extract_usage_tokens(&bytes);
+                    let cost = estimate_cost(
+                        pt,
+                        ct,
+                        target.connection.input_price_per_m,
+                        target.connection.output_price_per_m,
+                    );
+                    let _ = state.store.log_usage(
+                        Some(public_model),
+                        Some(&target.connection.id),
+                        Some(200),
+                        Some(latency),
+                        None,
+                        pt,
+                        ct,
+                        cost,
+                    );
+                    let out = responses::chat_to_responses(&bytes, public_model)?;
+                    return Ok(json_bytes_response(StatusCode::OK, out));
+                }
+            }
+            Err(e) => {
+                let secs = cooldown_secs_for_status(e.status);
+                if secs > 0 {
+                    state.cooldown.mark(&target.connection.id, secs);
+                }
+                let _ = state.store.log_usage(
+                    Some(public_model),
+                    Some(&target.connection.id),
+                    Some(e.status as i64),
+                    Some(start.elapsed().as_millis() as i64),
+                    Some(&e.body.chars().take(500).collect::<String>()),
+                    None,
+                    None,
+                    None,
+                );
+                if e.retryable && idx + 1 < targets.len() {
+                    last_err = Some(e);
+                    continue;
+                }
+                return Err(AppError::Upstream {
+                    status: e.status,
+                    body: e.body,
+                });
+            }
+        }
+    }
+
+    let e = last_err.unwrap_or(UpstreamAttemptError {
+        status: 503,
+        body: "no upstream targets".into(),
+        retryable: false,
+    });
+    Err(AppError::Upstream {
+        status: e.status,
+        body: e.body,
+    })
+}
+
+async fn read_bytes_cancel(
+    resp: reqwest::Response,
+    cancel: &CancellationToken,
+) -> AppResult<Bytes> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(AppError::BadRequest("client disconnected".into())),
+        r = resp.bytes() => r.map_err(|e| AppError::Internal(anyhow::anyhow!("read upstream body: {e}"))),
+    }
+}
+
 fn extract_usage_tokens(bytes: &Bytes) -> (Option<i64>, Option<i64>) {
     let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
         return (None, None);
@@ -400,82 +543,100 @@ fn json_bytes_response(status: StatusCode, bytes: Bytes) -> Response {
     (status, headers, bytes).into_response()
 }
 
-/// Stream upstream SSE with stall timeout. If `anthropic_model` is set, translate chunks.
+enum StreamMode {
+    Passthrough,
+    Anthropic(String),
+    Responses,
+}
+
+/// Stream upstream SSE with stall timeout. Dropping the body stops polling upstream.
 async fn stream_response(
     resp: reqwest::Response,
     stall_secs: u64,
-    anthropic_model: Option<String>,
+    mode: StreamMode,
 ) -> AppResult<Response> {
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::OK);
     let stall = Duration::from_secs(stall_secs.max(5));
     let mut upstream = resp.bytes_stream();
 
     let byte_stream = async_stream::stream! {
-        if let Some(model) = anthropic_model {
-            let mut state = StreamTranslateState::new(model);
-            let mut buf = String::new();
-            loop {
-                match timeout(stall, upstream.next()).await {
-                    Ok(Some(Ok(chunk))) => {
-                        buf.push_str(&String::from_utf8_lossy(&chunk));
-                        while let Some(pos) = buf.find('\n') {
-                            let mut line = buf[..pos].to_string();
-                            buf = buf[pos + 1..].to_string();
-                            if line.ends_with('\r') {
-                                line.pop();
-                            }
-                            if let Some(data) = line.strip_prefix("data:").or_else(|| line.strip_prefix("data: ")) {
-                                let data = data.trim_start();
-                                // handle "data: xxx" with space after colon already trimmed
-                                let data = data.strip_prefix(' ').unwrap_or(data);
-                                for ev in claude::openai_sse_chunk_to_anthropic(data, &mut state) {
-                                    let out = format!("{ev}\n\n");
-                                    yield Ok::<Bytes, std::io::Error>(Bytes::from(out));
+        match mode {
+            StreamMode::Anthropic(model) => {
+                let mut state = StreamTranslateState::new(model);
+                let mut buf = String::new();
+                loop {
+                    match timeout(stall, upstream.next()).await {
+                        Ok(Some(Ok(chunk))) => {
+                            buf.push_str(&String::from_utf8_lossy(&chunk));
+                            while let Some(pos) = buf.find('\n') {
+                                let mut line = buf[..pos].to_string();
+                                buf = buf[pos + 1..].to_string();
+                                if line.ends_with('\r') { line.pop(); }
+                                if let Some(data) = line.strip_prefix("data:") {
+                                    let data = data.trim_start().strip_prefix(' ').unwrap_or(data.trim_start());
+                                    for ev in claude::openai_sse_chunk_to_anthropic(data, &mut state) {
+                                        yield Ok::<Bytes, std::io::Error>(Bytes::from(format!("{ev}\n\n")));
+                                    }
                                 }
                             }
                         }
-                    }
-                    Ok(Some(Err(e))) => {
-                        yield Err(std::io::Error::other(e.to_string()));
-                        break;
-                    }
-                    Ok(None) => {
-                        if !state.message_stop_sent {
-                            for ev in claude::openai_sse_chunk_to_anthropic("[DONE]", &mut state) {
-                                let out = format!("{ev}\n\n");
-                                yield Ok(Bytes::from(out));
+                        Ok(Some(Err(e))) => { yield Err(std::io::Error::other(e.to_string())); break; }
+                        Ok(None) => {
+                            if !state.message_stop_sent {
+                                for ev in claude::openai_sse_chunk_to_anthropic("[DONE]", &mut state) {
+                                    yield Ok(Bytes::from(format!("{ev}\n\n")));
+                                }
                             }
+                            break;
                         }
-                        break;
-                    }
-                    Err(_) => {
-                        warn!("SSE stall timeout");
-                        yield Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            format!("SSE stall: no data for {stall_secs}s"),
-                        ));
-                        break;
+                        Err(_) => {
+                            warn!("SSE stall timeout");
+                            yield Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("SSE stall: no data for {stall_secs}s")));
+                            break;
+                        }
                     }
                 }
             }
-        } else {
-            loop {
-                match timeout(stall, upstream.next()).await {
-                    Ok(Some(Ok(chunk))) => {
-                        yield Ok::<Bytes, std::io::Error>(chunk);
+            StreamMode::Responses => {
+                let mut started = false;
+                let mut buf = String::new();
+                loop {
+                    match timeout(stall, upstream.next()).await {
+                        Ok(Some(Ok(chunk))) => {
+                            buf.push_str(&String::from_utf8_lossy(&chunk));
+                            while let Some(pos) = buf.find('\n') {
+                                let mut line = buf[..pos].to_string();
+                                buf = buf[pos + 1..].to_string();
+                                if line.ends_with('\r') { line.pop(); }
+                                if let Some(data) = line.strip_prefix("data:") {
+                                    let data = data.trim_start().strip_prefix(' ').unwrap_or(data.trim_start());
+                                    for ev in responses::chat_sse_to_responses_events(data, &mut started) {
+                                        yield Ok::<Bytes, std::io::Error>(Bytes::from(format!("{ev}\n\n")));
+                                    }
+                                }
+                            }
+                        }
+                        Ok(Some(Err(e))) => { yield Err(std::io::Error::other(e.to_string())); break; }
+                        Ok(None) => break,
+                        Err(_) => {
+                            warn!("SSE stall timeout");
+                            yield Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("SSE stall: no data for {stall_secs}s")));
+                            break;
+                        }
                     }
-                    Ok(Some(Err(e))) => {
-                        yield Err(std::io::Error::other(e.to_string()));
-                        break;
-                    }
-                    Ok(None) => break,
-                    Err(_) => {
-                        warn!("SSE stall timeout");
-                        yield Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            format!("SSE stall: no data for {stall_secs}s"),
-                        ));
-                        break;
+                }
+            }
+            StreamMode::Passthrough => {
+                loop {
+                    match timeout(stall, upstream.next()).await {
+                        Ok(Some(Ok(chunk))) => { yield Ok::<Bytes, std::io::Error>(chunk); }
+                        Ok(Some(Err(e))) => { yield Err(std::io::Error::other(e.to_string())); break; }
+                        Ok(None) => break,
+                        Err(_) => {
+                            warn!("SSE stall timeout");
+                            yield Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("SSE stall: no data for {stall_secs}s")));
+                            break;
+                        }
                     }
                 }
             }

@@ -23,8 +23,47 @@
     </aside>
     <main class="content">
       <h1>Usage</h1>
-      <p class="muted">Estimated total cost (from connection $/1M rates): <strong>${{ cost_total }}</strong></p>
+      <p class="muted">
+        Estimated total cost: <strong>${{ cost_total }}</strong>
+        · <a href="/admin/api/usage/export.csv">Export CSV</a>
+      </p>
+
       <section class="panel">
+        <h2>By day (last 14)</h2>
+        {% if daily %}
+        <table>
+          <thead>
+            <tr>
+              <th>Day</th>
+              <th>Requests</th>
+              <th>OK</th>
+              <th>Errors</th>
+              <th>Tokens in/out</th>
+              <th>Cost</th>
+              <th>Avg latency</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for d in daily %}
+            <tr>
+              <td class="mono">{{ d.day }}</td>
+              <td>{{ d.requests }}</td>
+              <td>{{ d.ok }}</td>
+              <td>{{ d.errors }}</td>
+              <td class="mono">{{ d.prompt_tokens }}/{{ d.completion_tokens }}</td>
+              <td>${{ d.estimated_cost_usd }}</td>
+              <td>{{ d.avg_latency_ms }} ms</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="muted">No daily data yet.</p>
+        {% endif %}
+      </section>
+
+      <section class="panel">
+        <h2>Recent events</h2>
         {% if events %}
         <table>
           <thead>

@@ -1,5 +1,6 @@
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -37,6 +38,12 @@ pub fn router() -> Router<AppState> {
         .route("/admin/api/keys/{id}/enable", post(enable_key))
         .route("/admin/api/keys/{id}/disable", post(disable_key))
         .route("/admin/api/usage", get(usage))
+        .route("/admin/api/usage/daily", get(usage_daily))
+        .route("/admin/api/usage/export.csv", get(usage_export_csv))
+        .route(
+            "/admin/api/connections/oauth/import",
+            post(import_oauth_connection),
+        )
 }
 
 fn check_admin(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
@@ -203,7 +210,7 @@ async fn test_connection(
         .proxy
         .http
         .get(&url)
-        .header("authorization", format!("Bearer {}", conn.api_key))
+        .header("authorization", format!("Bearer {}", conn.bearer_token()))
         .send()
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("test request failed: {e}")))?;
@@ -400,6 +407,113 @@ async fn usage(
 ) -> AppResult<Json<Value>> {
     check_admin(&state, &headers)?;
     Ok(Json(json!({ "data": state.store.recent_usage(100)? })))
+}
+
+async fn usage_daily(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    Ok(Json(json!({ "data": state.store.usage_by_day(30)? })))
+}
+
+async fn usage_export_csv(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    check_admin(&state, &headers)?;
+    let csv = state.store.usage_csv(1000)?;
+    Ok((
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/csv; charset=utf-8",
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"thinrouter-usage.csv\"",
+            ),
+        ],
+        csv,
+    )
+        .into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OAuthImportInput {
+    pub name: String,
+    /// Provider id: codex | claude | github_copilot | cursor | kiro | generic
+    pub provider: String,
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_at: Option<String>,
+    pub base_url: Option<String>,
+    pub default_model: Option<String>,
+    pub meta: Option<String>,
+    #[serde(default = "default_priority")]
+    pub priority: i64,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_base_for_provider(provider: &str) -> &'static str {
+    match provider {
+        "codex" | "openai" => "https://api.openai.com/v1",
+        "claude" | "anthropic" => "https://api.anthropic.com/v1",
+        "github_copilot" | "copilot" => "https://api.githubcopilot.com",
+        "cursor" => "https://api2.cursor.sh",
+        "kiro" => "https://kiro.dev/api",
+        _ => "https://api.openai.com/v1",
+    }
+}
+
+async fn import_oauth_connection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<OAuthImportInput>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    check_admin(&state, &headers)?;
+    if input.name.trim().is_empty() {
+        return Err(AppError::BadRequest("name is required".into()));
+    }
+    if input.access_token.trim().is_empty() {
+        return Err(AppError::BadRequest("access_token is required".into()));
+    }
+    let provider = input.provider.trim();
+    if provider.is_empty() {
+        return Err(AppError::BadRequest("provider is required".into()));
+    }
+    let base = input
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default_base_for_provider(provider));
+
+    let row = state
+        .store
+        .upsert_oauth_connection(
+            None,
+            input.name.trim(),
+            base,
+            provider,
+            input.access_token.trim(),
+            input.refresh_token.as_deref(),
+            input.expires_at.as_deref(),
+            input.meta.as_deref(),
+            input.default_model.as_deref(),
+            input.priority,
+            input.enabled,
+        )
+        .map_err(|e| AppError::Internal(e))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "connection": ConnectionPublic::from(row),
+            "note": "OAuth/session tokens stored as oauth_import. Full browser OAuth per-provider is next; import unblocks personal subscriptions now. Upstream may still need provider-specific request shapes."
+        })),
+    ))
 }
 
 // re-export for cookie name used by tests/docs

@@ -47,14 +47,39 @@
       </section>
 
       <section class="panel">
+        <h2>Import OAuth / session token (personal subscription)</h2>
+        <p class="muted small">No API key needed. Paste access token from your CLI/browser session. Full browser OAuth per provider is planned next.</p>
+        <form id="oauth-import" class="form-grid" onsubmit="return importOauth(event)">
+          <label>Name <input id="oa-name" required placeholder="my-codex" /></label>
+          <label>Provider
+            <select id="oa-provider">
+              <option value="codex">codex (OpenAI)</option>
+              <option value="claude">claude (Anthropic)</option>
+              <option value="github_copilot">github_copilot</option>
+              <option value="cursor">cursor</option>
+              <option value="kiro">kiro</option>
+              <option value="generic">generic</option>
+            </select>
+          </label>
+          <label>Access token <input id="oa-access" required type="password" /></label>
+          <label>Refresh token <input id="oa-refresh" type="password" placeholder="optional" /></label>
+          <label>Base URL override <input id="oa-base" placeholder="leave empty = provider default" /></label>
+          <label>Default model <input id="oa-model" placeholder="optional" /></label>
+          <button type="submit">Import OAuth connection</button>
+        </form>
+        <p id="oa-result" class="muted small"></p>
+      </section>
+
+      <section class="panel">
         <h2>Existing</h2>
         {% if connections %}
         <table>
           <thead>
             <tr>
               <th>Name</th>
+              <th>Auth</th>
               <th>Base URL</th>
-              <th>Key</th>
+              <th>Secret</th>
               <th>Default model</th>
               <th>Priority</th>
               <th>Enabled</th>
@@ -65,6 +90,7 @@
             {% for c in connections %}
             <tr>
               <td><strong>{{ c.name }}</strong></td>
+              <td class="mono">{{ c.auth_type }}{% if c.provider %} / {{ c.provider }}{% endif %}</td>
               <td class="mono">{{ c.base_url }}</td>
               <td class="mono">{{ c.api_key_masked }}</td>
               <td>{{ c.default_model or "—" }}</td>
@@ -109,6 +135,40 @@
       } finally {
         btn.disabled = false;
       }
+    }
+    async function importOauth(e) {
+      e.preventDefault();
+      const el = document.getElementById('oa-result');
+      el.textContent = 'Importing…';
+      const body = {
+        name: document.getElementById('oa-name').value,
+        provider: document.getElementById('oa-provider').value,
+        access_token: document.getElementById('oa-access').value,
+        refresh_token: document.getElementById('oa-refresh').value || null,
+        base_url: document.getElementById('oa-base').value || null,
+        default_model: document.getElementById('oa-model').value || null
+      };
+      try {
+        const r = await fetch('/admin/api/connections/oauth/import', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const j = await r.json();
+        if (r.ok) {
+          el.textContent = 'Imported ' + (j.connection?.name || '') + ' — reloading…';
+          el.className = 'muted small ok-text';
+          setTimeout(() => location.reload(), 600);
+        } else {
+          el.textContent = 'Fail: ' + (j.error?.message || r.status);
+          el.className = 'muted small err-text';
+        }
+      } catch (err) {
+        el.textContent = 'Error: ' + err;
+        el.className = 'muted small err-text';
+      }
+      return false;
     }
   </script>
 </body>

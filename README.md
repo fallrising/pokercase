@@ -11,9 +11,11 @@ A **thin** OpenAI-compatible LLM API proxy in Rust, inspired by [9router](https:
 
 > **Naming:** the GitHub repository is **pokercase**; the product binary and local data dir are **thinrouter** (`~/.thinrouter`). This is intentional documentation, not a rename of either side.
 
-**In scope:** `/v1/chat/completions` (stream + non-stream), Anthropic `/v1/messages` translation, model routes with fallback / round-robin, web admin, TUI, local SQLite.
+**In scope:** `/v1/chat/completions`, `/v1/messages`, `/v1/responses`, routes + fallback/RR, **OAuth/session token import** (personal subscriptions), optional token-saver, web admin, TUI, SQLite.
 
-**Out of scope:** OAuth subscription providers, MITM, RTK, media endpoints, 9router.db compatibility.
+**Architecture:** Layer A = this gateway; Layer B = your multi-agent “team” apps calling only Layer A. See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md).
+
+**Out of scope (for now):** MITM, cloud sync, 9router.db compatibility, media APIs.
 
 ## Quick start
 
@@ -21,14 +23,17 @@ A **thin** OpenAI-compatible LLM API proxy in Rust, inspired by [9router](https:
 cargo run -- serve
 # admin:  http://127.0.0.1:20128/admin
 # proxy:  http://127.0.0.1:20128/v1
-# claude: http://127.0.0.1:20128/v1/messages
-# data:   ~/.thinrouter/thinrouter.db
+# claude:    http://127.0.0.1:20128/v1/messages
+# responses: http://127.0.0.1:20128/v1/responses
+# data:      ~/.thinrouter/thinrouter.db
 ```
 
-1. Open **Connections** → add an OpenAI-compatible upstream (`base_url` + `api_key` + default model).
-2. Open **Routes** → map a public model name to one or more targets (fallback order).
-3. Optionally create an **API Key**. If none exist, `/v1` is open (bootstrap mode).
-4. Call the proxy (see [docs/CLIENTS.md](./docs/CLIENTS.md)).
+1. Open **Connections** → either:
+   - **Import OAuth / session token** (personal subscription; no API key), or  
+   - Add OpenAI-compatible `base_url` + API key (optional path).
+2. Open **Routes** → map a public model name to one or more targets.
+3. Optionally create a **gateway API Key**. If none exist, `/v1` is open (bootstrap).
+4. Point clients at the proxy (see [docs/CLIENTS.md](./docs/CLIENTS.md)).
 
 ```bash
 curl -s http://127.0.0.1:20128/v1/chat/completions \
@@ -66,15 +71,19 @@ thinrouter tui
 | `THINROUTER_ADMIN_TOKEN` / `--admin-token` | Protect `/admin` (login UI + `x-admin-token` / cookie) |
 | `THINROUTER_SECRETS_KEY` / `--secrets-key` | Encrypt connection API keys at rest |
 | `THINROUTER_SSE_STALL_SECS` / `--sse-stall-secs` | Abort SSE if no chunk (default 90) |
+| `THINROUTER_TOKEN_SAVER` / `--token-saver` | Truncate tool / huge message content |
+| `THINROUTER_TOKEN_SAVER_MAX_CHARS` | Max chars kept per tool-like block (default 2000) |
+| `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` | Upstream egress proxy |
 
 ## Admin JSON API
 
 Same operations as the UI under `/admin/api/*` (cookie or `x-admin-token` when configured):
 
 - `GET/POST /admin/api/connections` · `PUT/DELETE .../{id}` · `POST .../{id}/test`
+- `POST /admin/api/connections/oauth/import` — personal subscription tokens
 - `GET/POST /admin/api/routes` · `GET/PUT/DELETE .../{id}`
 - `GET/POST /admin/api/keys` · `DELETE .../{id}`
-- `GET /admin/api/usage` · `GET /admin/api/stats`
+- `GET /admin/api/usage` · `.../daily` · `.../export.csv` · `GET /admin/api/stats`
 
 Multi-target route:
 
