@@ -366,6 +366,12 @@ fn import_agy(store: &Store, make_routes: bool) -> ImportResult {
             detail: "no tokens".into(),
         };
     }
+    // project is filled on first request via loadCodeAssist (or set THINROUTER_AGY_PROJECT)
+    let project = std::env::var("THINROUTER_AGY_PROJECT").ok();
+    let meta = serde_json::json!({
+        "source": "~/.gemini/antigravity-cli/antigravity-oauth-token",
+        "project": project,
+    });
     upsert(
         store,
         "local-agy",
@@ -373,8 +379,8 @@ fn import_agy(store: &Store, make_routes: bool) -> ImportResult {
         access,
         refresh,
         exp,
-        Some(r#"{"source":"~/.gemini/antigravity-cli/antigravity-oauth-token"}"#),
-        Some("gemini-3-flash"),
+        Some(&meta.to_string()),
+        Some("gemini-2.5-flash"),
         make_routes,
     )
 }

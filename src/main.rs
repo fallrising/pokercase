@@ -1,4 +1,5 @@
 mod admin;
+mod agy;
 mod cancel;
 mod claude;
 mod config;

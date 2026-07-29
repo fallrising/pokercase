@@ -76,11 +76,11 @@ Legend: ✅ done · 🟨 partial · ❌ not started · 🚫 deferred
 1. [x] Registry: **codex, claude, cursor, grok, opencode, agy** (+ wishlist list in docs/PROVIDERS.md)
 2. [x] Active forward: codex / claude / grok / opencode (format + headers)
 3. [x] Partial: cursor / agy (import tokens; executor later)
-4. [x] Smoke with local tokens: **codex/grok/opencode OK**; claude 429; cursor/agy 501
+4. [x] Smoke: **codex / grok / opencode / agy OK**; claude depends on local credentials; cursor still 501
 5. [x] OAuth **refresh** for codex / claude / grok / agy (+ 401 retry)
 6. [x] `thinrouter import-local --routes --refresh`
-7. [ ] Cursor protobuf executor  
-8. [ ] Antigravity `v1internal:generateContent` full body (needs project/loadCodeAssist)
+7. [x] Antigravity `loadCodeAssist` + `generateContent` executor
+8. [ ] Cursor protobuf / AgentService executor
 
 ### P1 — Protocol & cost
 

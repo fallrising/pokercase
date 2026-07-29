@@ -487,6 +487,15 @@ impl Store {
             .context("connection missing after upsert")
     }
 
+    pub fn update_oauth_meta(&self, connection_id: &str, meta: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE oauth_credentials SET meta = ?1 WHERE connection_id = ?2",
+            params![meta, connection_id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_oauth_tokens(
         &self,
         connection_id: &str,

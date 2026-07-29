@@ -29,6 +29,8 @@ pub enum UpstreamFormat {
     OpenAiResponses,
     /// Anthropic Messages
     AnthropicMessages,
+    /// Google Antigravity cloudcode-pa generateContent
+    Antigravity,
     /// Not yet implemented — refuse generic chat forward
     Stub,
 }
@@ -190,14 +192,14 @@ pub const ACTIVE: &[ProviderProfile] = &[
         aliases: &["ag", "antigravity", "google_antigravity"],
         display_name: "Antigravity (Google)",
         category: "oauth",
-        status: ProviderStatus::Partial,
+        status: ProviderStatus::Active,
         default_base_url: "https://cloudcode-pa.googleapis.com",
-        format: UpstreamFormat::Stub,
-        default_model: Some("gemini-3-flash"),
+        format: UpstreamFormat::Antigravity,
+        default_model: Some("gemini-2.5-flash"),
         auth: AuthScheme::Bearer,
         extra_headers: &[("User-Agent", "antigravity/ide/1.0 darwin/arm64")],
         force_stream: false,
-        notes: "Token: ~/.gemini/antigravity-cli/antigravity-oauth-token. Executor not wired yet.",
+        notes: "Token: ~/.gemini/antigravity-cli/antigravity-oauth-token. Uses loadCodeAssist project + generateContent. Set THINROUTER_AGY_CLIENT_* for refresh.",
     },
 ];
 
@@ -292,6 +294,10 @@ pub fn build_upstream_url(profile: &ProviderProfile, base_url: &str) -> String {
             } else {
                 format!("{base}/messages?beta=true")
             }
+        }
+        UpstreamFormat::Antigravity => {
+            // Full URL used by agy module; base kept for connection display.
+            "https://cloudcode-pa.googleapis.com/v1internal:generateContent".into()
         }
         UpstreamFormat::Stub => base.to_string(),
     }

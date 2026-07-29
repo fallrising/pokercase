@@ -20,6 +20,7 @@ use crate::providers::{self, UpstreamFormat};
 use crate::responses;
 use crate::store::{ResolvedTarget, Store};
 use crate::token_saver;
+use serde_json::json;
 
 #[derive(Clone)]
 pub struct ProxyState {
@@ -82,6 +83,8 @@ pub enum UpstreamBodyKind {
     OpenAiResponses,
     /// Upstream spoke Anthropic; convert to chat for chat clients.
     Anthropic,
+    /// Antigravity generateContent envelope.
+    Antigravity,
 }
 
 pub struct ForwardOk {
@@ -192,6 +195,30 @@ async fn forward_chat_completions_inner(
                 UpstreamFormat::AnthropicMessages => {
                     match claude::openai_to_anthropic_request(&prepared) {
                         Ok(b) => (b, UpstreamBodyKind::Anthropic),
+                        Err(e) => {
+                            return Err(UpstreamAttemptError {
+                                status: 400,
+                                body: e.to_string(),
+                                retryable: false,
+                            });
+                        }
+                    }
+                }
+                UpstreamFormat::Antigravity => {
+                    // Resolve project from meta or loadCodeAssist.
+                    let project = resolve_agy_project(state, target).await.map_err(|e| {
+                        UpstreamAttemptError {
+                            status: 502,
+                            body: e.to_string(),
+                            retryable: true,
+                        }
+                    })?;
+                    match crate::agy::chat_to_agy_request(
+                        &prepared,
+                        &project,
+                        &target.upstream_model,
+                    ) {
+                        Ok(b) => (b, UpstreamBodyKind::Antigravity),
                         Err(e) => {
                             return Err(UpstreamAttemptError {
                                 status: 400,
@@ -355,12 +382,47 @@ fn force_json_stream_true(body: &Bytes) -> AppResult<Bytes> {
     Ok(Bytes::from(serde_json::to_vec(&v)?))
 }
 
-fn convert_upstream_to_chat(bytes: Bytes, kind: UpstreamBodyKind) -> AppResult<Bytes> {
+fn convert_upstream_to_chat(
+    bytes: Bytes,
+    kind: UpstreamBodyKind,
+    model: &str,
+) -> AppResult<Bytes> {
     match kind {
         UpstreamBodyKind::OpenAiChat => Ok(bytes),
         UpstreamBodyKind::OpenAiResponses => responses::responses_body_to_chat(&bytes),
         UpstreamBodyKind::Anthropic => claude::anthropic_to_openai_response(&bytes),
+        UpstreamBodyKind::Antigravity => crate::agy::agy_to_chat_response(&bytes, model),
     }
+}
+
+async fn resolve_agy_project(
+    state: &ProxyState,
+    target: &ResolvedTarget,
+) -> AppResult<String> {
+    if let Some(meta) = target.connection.oauth.as_ref().and_then(|o| o.meta.as_deref()) {
+        if let Ok(v) = serde_json::from_str::<Value>(meta) {
+            if let Some(p) = v.get("project").and_then(|p| p.as_str()) {
+                if !p.is_empty() {
+                    return Ok(p.to_string());
+                }
+            }
+        }
+    }
+    let token = target.connection.bearer_token();
+    let project = crate::agy::fetch_project_id(token).await?;
+    // Persist project into meta for next call
+    if let Some(oauth) = &target.connection.oauth {
+        let mut meta_v: Value = oauth
+            .meta
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_else(|| json!({}));
+        if let Some(obj) = meta_v.as_object_mut() {
+            obj.insert("project".into(), Value::String(project.clone()));
+        }
+        let _ = state.store.update_oauth_meta(&target.connection.id, &meta_v.to_string());
+    }
+    Ok(project)
 }
 
 /// Collect Responses SSE text deltas into a synthetic Responses JSON body.
@@ -500,7 +562,8 @@ pub async fn handle_chat_with_fallback(
                     } else {
                         bytes
                     };
-                    let bytes = convert_upstream_to_chat(bytes, fwd.body_kind)?;
+                    let bytes =
+                        convert_upstream_to_chat(bytes, fwd.body_kind, &target.upstream_model)?;
                     let (pt, ct) = extract_usage_tokens(&bytes);
                     let cost = estimate_cost(
                         pt,
@@ -611,7 +674,8 @@ pub async fn handle_anthropic_messages(
                     return stream_response(fwd.response, state.sse_stall_secs, mode).await;
                 } else {
                     let bytes = read_bytes_cancel(fwd.response, &cancel).await?;
-                    let chat = convert_upstream_to_chat(bytes, fwd.body_kind)?;
+                    let chat =
+                        convert_upstream_to_chat(bytes, fwd.body_kind, &target.upstream_model)?;
                     let (pt, ct) = extract_usage_tokens(&chat);
                     let cost = estimate_cost(
                         pt,
@@ -719,7 +783,11 @@ pub async fn handle_responses(
                     let out = match fwd.body_kind {
                         UpstreamBodyKind::OpenAiResponses => bytes,
                         other => {
-                            let chat = convert_upstream_to_chat(bytes, other)?;
+                            let chat = convert_upstream_to_chat(
+                                bytes,
+                                other,
+                                &target.upstream_model,
+                            )?;
                             responses::chat_to_responses(&chat, public_model)?
                         }
                     };

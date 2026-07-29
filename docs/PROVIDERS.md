@@ -8,10 +8,10 @@ Personal subscription / free upstreams for **Layer A** (thinrouter).
 |----|---------|--------|--------|--------------|
 | `codex` | `cx` | **active** | OpenAI Responses | `https://chatgpt.com/backend-api/codex/responses` |
 | `claude` | `cc`, `anthropic` | **active** | Anthropic Messages | `https://api.anthropic.com/v1/messages` |
-| `cursor` | `cu` | **partial** | Stub (import only) | `https://api2.cursor.sh` |
+| `cursor` | `cu` | **partial** | Stub (import only; Connect/protobuf pending) | `https://api2.cursor.sh` |
 | `grok` | `xai`, `grok_cli` | **active** | OpenAI Responses | `https://cli-chat-proxy.grok.com/v1` |
 | `opencode` | `oc` | **active** | OpenAI Chat | `https://opencode.ai/zen/v1` |
-| `agy` | `ag`, `antigravity` | **partial** | Stub (import only) | `https://cloudcode-pa.googleapis.com` |
+| `agy` | `ag`, `antigravity` | **active** | Antigravity generateContent | `https://cloudcode-pa.googleapis.com` |
 
 **Status meaning**
 
