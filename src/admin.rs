@@ -44,6 +44,7 @@ pub fn router() -> Router<AppState> {
             "/admin/api/connections/oauth/import",
             post(import_oauth_connection),
         )
+        .route("/admin/api/providers", get(list_providers))
 }
 
 fn check_admin(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
@@ -456,15 +457,12 @@ pub struct OAuthImportInput {
     pub enabled: bool,
 }
 
-fn default_base_for_provider(provider: &str) -> &'static str {
-    match provider {
-        "codex" | "openai" => "https://api.openai.com/v1",
-        "claude" | "anthropic" => "https://api.anthropic.com/v1",
-        "github_copilot" | "copilot" => "https://api.githubcopilot.com",
-        "cursor" => "https://api2.cursor.sh",
-        "kiro" => "https://kiro.dev/api",
-        _ => "https://api.openai.com/v1",
-    }
+async fn list_providers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    Ok(Json(crate::providers::list_public()))
 }
 
 async fn import_oauth_connection(
@@ -476,19 +474,49 @@ async fn import_oauth_connection(
     if input.name.trim().is_empty() {
         return Err(AppError::BadRequest("name is required".into()));
     }
-    if input.access_token.trim().is_empty() {
-        return Err(AppError::BadRequest("access_token is required".into()));
-    }
-    let provider = input.provider.trim();
-    if provider.is_empty() {
+    // OpenCode free allows empty token
+    let provider_raw = input.provider.trim();
+    if provider_raw.is_empty() {
         return Err(AppError::BadRequest("provider is required".into()));
     }
+    let profile = crate::providers::resolve(provider_raw);
+    let canonical = profile.map(|p| p.id).unwrap_or(provider_raw);
+    if profile.is_none() && input.access_token.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "unknown provider and empty access_token".into(),
+        ));
+    }
+    if profile.is_some()
+        && input.access_token.trim().is_empty()
+        && profile.map(|p| p.id) != Some("opencode")
+    {
+        return Err(AppError::BadRequest(
+            "access_token is required for this provider".into(),
+        ));
+    }
+
     let base = input
         .base_url
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| default_base_for_provider(provider));
+        .unwrap_or_else(|| crate::providers::default_base_url(canonical));
+
+    let default_model = input
+        .default_model
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| profile.and_then(|p| p.default_model));
+
+    let status_note = match profile.map(|p| p.status) {
+        Some(crate::providers::ProviderStatus::Active) => {
+            "active: format conversion + forward wired"
+        }
+        Some(crate::providers::ProviderStatus::Partial) => {
+            "partial: token stored; full executor not wired yet (see docs/PROVIDERS.md)"
+        }
+        _ => "generic oauth_import",
+    };
 
     let row = state
         .store
@@ -496,22 +524,24 @@ async fn import_oauth_connection(
             None,
             input.name.trim(),
             base,
-            provider,
+            canonical,
             input.access_token.trim(),
             input.refresh_token.as_deref(),
             input.expires_at.as_deref(),
             input.meta.as_deref(),
-            input.default_model.as_deref(),
+            default_model,
             input.priority,
             input.enabled,
         )
-        .map_err(|e| AppError::Internal(e))?;
+        .map_err(AppError::Internal)?;
 
     Ok((
         StatusCode::CREATED,
         Json(json!({
             "connection": ConnectionPublic::from(row),
-            "note": "OAuth/session tokens stored as oauth_import. Full browser OAuth per-provider is next; import unblocks personal subscriptions now. Upstream may still need provider-specific request shapes."
+            "provider": canonical,
+            "status": status_note,
+            "notes": profile.map(|p| p.notes).unwrap_or(""),
         })),
     ))
 }

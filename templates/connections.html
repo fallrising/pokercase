@@ -48,20 +48,25 @@
 
       <section class="panel">
         <h2>Import OAuth / session token (personal subscription)</h2>
-        <p class="muted small">No API key needed. Paste access token from your CLI/browser session. Full browser OAuth per provider is planned next.</p>
+        <p class="muted small">
+          Personal subscription path (no paid API key).
+          Active: <code>codex</code> <code>claude</code> <code>grok</code> <code>opencode</code>.
+          Partial (import only): <code>cursor</code> <code>agy</code>.
+          Full list + wishlist: <code>GET /admin/api/providers</code> · docs/PROVIDERS.md
+        </p>
         <form id="oauth-import" class="form-grid" onsubmit="return importOauth(event)">
           <label>Name <input id="oa-name" required placeholder="my-codex" /></label>
           <label>Provider
             <select id="oa-provider">
-              <option value="codex">codex (OpenAI)</option>
-              <option value="claude">claude (Anthropic)</option>
-              <option value="github_copilot">github_copilot</option>
-              <option value="cursor">cursor</option>
-              <option value="kiro">kiro</option>
-              <option value="generic">generic</option>
+              <option value="codex">codex — ChatGPT Codex (active)</option>
+              <option value="claude">claude — Claude Code (active)</option>
+              <option value="cursor">cursor — Cursor IDE (partial)</option>
+              <option value="grok">grok — Grok CLI / xAI (active)</option>
+              <option value="opencode">opencode — OpenCode Free (active)</option>
+              <option value="agy">agy — Antigravity (partial)</option>
             </select>
           </label>
-          <label>Access token <input id="oa-access" required type="password" /></label>
+          <label>Access token <input id="oa-access" type="password" placeholder="empty OK for opencode free" /></label>
           <label>Refresh token <input id="oa-refresh" type="password" placeholder="optional" /></label>
           <label>Base URL override <input id="oa-base" placeholder="leave empty = provider default" /></label>
           <label>Default model <input id="oa-model" placeholder="optional" /></label>

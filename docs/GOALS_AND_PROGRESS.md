@@ -73,9 +73,12 @@ Legend: ✅ done · 🟨 partial · ❌ not started · 🚫 deferred
 
 ### P0 — Unblock personal subscriptions
 
-1. [ ] Import + smoke **your** Codex / Claude / Cursor / Copilot / Kiro tokens end-to-end  
-2. [ ] Per-provider **refresh** where tokens expire  
-3. [ ] Provider-specific forward quirks (headers, base paths) as needed when import alone fails  
+1. [x] Registry: **codex, claude, cursor, grok, opencode, agy** (+ wishlist list in docs/PROVIDERS.md)
+2. [x] Active forward: codex / claude / grok / opencode (format + headers)
+3. [x] Partial: cursor / agy (import tokens; executor later)
+4. [ ] Smoke **your** real tokens end-to-end  
+5. [ ] Per-provider **refresh** when tokens expire  
+6. [ ] Cursor protobuf executor + Antigravity Gemini envelope when needed
 
 ### P1 — Protocol & cost
 

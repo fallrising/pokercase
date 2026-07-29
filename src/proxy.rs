@@ -16,6 +16,7 @@ use tracing::{debug, warn};
 use crate::claude::{self, StreamTranslateState};
 use crate::cooldown::{cooldown_secs_for_status, CooldownMap};
 use crate::error::{AppError, AppResult};
+use crate::providers::{self, UpstreamFormat};
 use crate::responses;
 use crate::store::{ResolvedTarget, Store};
 use crate::token_saver;
@@ -72,13 +73,29 @@ pub fn extract_model_and_stream(body: &Bytes) -> AppResult<(String, bool)> {
     Ok((model, stream))
 }
 
-fn chat_completions_url(base_url: &str) -> String {
-    let base = base_url.trim_end_matches('/');
-    if base.ends_with("/chat/completions") {
-        base.to_string()
-    } else {
-        format!("{base}/chat/completions")
-    }
+/// How to interpret the upstream HTTP body for the client surface.
+#[derive(Debug, Clone, Copy)]
+pub enum UpstreamBodyKind {
+    /// Already OpenAI chat completions JSON / SSE.
+    OpenAiChat,
+    /// Upstream spoke Responses; convert to chat for chat clients.
+    OpenAiResponses,
+    /// Upstream spoke Anthropic; convert to chat for chat clients.
+    Anthropic,
+}
+
+pub struct ForwardOk {
+    pub response: reqwest::Response,
+    pub body_kind: UpstreamBodyKind,
+}
+
+fn provider_id_for(target: &ResolvedTarget) -> Option<String> {
+    target
+        .connection
+        .oauth
+        .as_ref()
+        .map(|o| o.provider.clone())
+        .filter(|s| !s.is_empty())
 }
 
 pub async fn forward_chat_completions(
@@ -87,24 +104,92 @@ pub async fn forward_chat_completions(
     body: Bytes,
     stream: bool,
     cancel: &CancellationToken,
-) -> Result<reqwest::Response, UpstreamAttemptError> {
-    let url = chat_completions_url(&target.connection.base_url);
-    let rewritten = match rewrite_model(&body, &target.upstream_model) {
-        Ok(b) => b,
-        Err(e) => {
+) -> Result<ForwardOk, UpstreamAttemptError> {
+    let provider_key = provider_id_for(target);
+    let profile = provider_key.as_deref().and_then(providers::resolve);
+
+    if let Some(p) = profile {
+        if p.format == UpstreamFormat::Stub {
             return Err(UpstreamAttemptError {
-                status: 400,
-                body: e.to_string(),
+                status: 501,
+                body: format!(
+                    "provider '{}' is partial/stub — token import works, full executor not wired yet. See docs/PROVIDERS.md",
+                    p.id
+                ),
                 retryable: false,
             });
         }
+    }
+
+    let (url, wire_body, body_kind, extra_headers, auth) = if let Some(p) = profile {
+        let url = providers::build_upstream_url(p, &target.connection.base_url);
+        let prepared = match rewrite_model(&body, &target.upstream_model) {
+            Ok(b) => b,
+            Err(e) => {
+                return Err(UpstreamAttemptError {
+                    status: 400,
+                    body: e.to_string(),
+                    retryable: false,
+                });
+            }
+        };
+        let (wire, kind) = match p.format {
+            UpstreamFormat::OpenAiChat => (prepared, UpstreamBodyKind::OpenAiChat),
+            UpstreamFormat::OpenAiResponses => {
+                match responses::chat_to_responses_request(&prepared) {
+                    Ok(b) => (b, UpstreamBodyKind::OpenAiResponses),
+                    Err(e) => {
+                        return Err(UpstreamAttemptError {
+                            status: 400,
+                            body: e.to_string(),
+                            retryable: false,
+                        });
+                    }
+                }
+            }
+            UpstreamFormat::AnthropicMessages => {
+                match claude::openai_to_anthropic_request(&prepared) {
+                    Ok(b) => (b, UpstreamBodyKind::Anthropic),
+                    Err(e) => {
+                        return Err(UpstreamAttemptError {
+                            status: 400,
+                            body: e.to_string(),
+                            retryable: false,
+                        });
+                    }
+                }
+            }
+            UpstreamFormat::Stub => unreachable!(),
+        };
+        let auth = providers::authorization_header(p, target.connection.bearer_token());
+        (url, wire, kind, p.extra_headers, auth)
+    } else {
+        // Generic OpenAI-compatible connection
+        let base = target.connection.base_url.trim_end_matches('/');
+        let url = if base.ends_with("/chat/completions") {
+            base.to_string()
+        } else {
+            format!("{base}/chat/completions")
+        };
+        let wire = match rewrite_model(&body, &target.upstream_model) {
+            Ok(b) => b,
+            Err(e) => {
+                return Err(UpstreamAttemptError {
+                    status: 400,
+                    body: e.to_string(),
+                    retryable: false,
+                });
+            }
+        };
+        let auth = Some(format!("Bearer {}", target.connection.bearer_token()));
+        (url, wire, UpstreamBodyKind::OpenAiChat, &[][..], auth)
     };
 
-    let bearer = target.connection.bearer_token();
     debug!(
         url = %url,
         connection = %target.connection.name,
         auth_type = %target.connection.auth_type,
+        provider = provider_key.as_deref().unwrap_or("-"),
         model = %target.upstream_model,
         stream,
         "forwarding chat completions"
@@ -114,9 +199,14 @@ pub async fn forward_chat_completions(
         .http
         .post(&url)
         .header("content-type", "application/json")
-        .header("authorization", format!("Bearer {bearer}"))
-        .body(rewritten);
+        .body(wire_body);
 
+    if let Some(a) = auth {
+        req = req.header("authorization", a);
+    }
+    for (k, v) in extra_headers {
+        req = req.header(*k, *v);
+    }
     if stream {
         req = req.header("accept", "text/event-stream");
     }
@@ -138,7 +228,10 @@ pub async fn forward_chat_completions(
         Ok(resp) => {
             let status = resp.status().as_u16();
             if status == 200 {
-                Ok(resp)
+                Ok(ForwardOk {
+                    response: resp,
+                    body_kind,
+                })
             } else {
                 let body = resp.text().await.unwrap_or_default();
                 Err(UpstreamAttemptError {
@@ -153,6 +246,14 @@ pub async fn forward_chat_completions(
             body: format!("upstream request failed: {e}"),
             retryable: true,
         }),
+    }
+}
+
+fn convert_upstream_to_chat(bytes: Bytes, kind: UpstreamBodyKind) -> AppResult<Bytes> {
+    match kind {
+        UpstreamBodyKind::OpenAiChat => Ok(bytes),
+        UpstreamBodyKind::OpenAiResponses => responses::responses_body_to_chat(&bytes),
+        UpstreamBodyKind::Anthropic => claude::anthropic_to_openai_response(&bytes),
     }
 }
 
@@ -210,7 +311,7 @@ pub async fn handle_chat_with_fallback(
         }
         let start = Instant::now();
         match forward_chat_completions(state, target, body.clone(), stream, &cancel).await {
-            Ok(resp) => {
+            Ok(fwd) => {
                 let latency = start.elapsed().as_millis() as i64;
                 state.cooldown.clear(&target.connection.id);
                 if stream {
@@ -225,10 +326,12 @@ pub async fn handle_chat_with_fallback(
                         None,
                     );
                     cancel_guard.disarm();
-                    return stream_response(resp, state.sse_stall_secs, StreamMode::Passthrough)
+                    // Stream format conversion for Responses/Anthropic is limited; passthrough bytes.
+                    return stream_response(fwd.response, state.sse_stall_secs, StreamMode::Passthrough)
                         .await;
                 } else {
-                    let bytes = read_bytes_cancel(resp, &cancel).await?;
+                    let bytes = read_bytes_cancel(fwd.response, &cancel).await?;
+                    let bytes = convert_upstream_to_chat(bytes, fwd.body_kind)?;
                     let (pt, ct) = extract_usage_tokens(&bytes);
                     let cost = estimate_cost(
                         pt,
@@ -315,7 +418,7 @@ pub async fn handle_anthropic_messages(
         }
         let start = Instant::now();
         match forward_chat_completions(state, target, oai_body.clone(), stream, &cancel).await {
-            Ok(resp) => {
+            Ok(fwd) => {
                 let latency = start.elapsed().as_millis() as i64;
                 state.cooldown.clear(&target.connection.id);
                 if stream {
@@ -330,15 +433,17 @@ pub async fn handle_anthropic_messages(
                         None,
                     );
                     cancel_guard.disarm();
-                    return stream_response(
-                        resp,
-                        state.sse_stall_secs,
-                        StreamMode::Anthropic(public_model.to_string()),
-                    )
-                    .await;
+                    let mode = match fwd.body_kind {
+                        UpstreamBodyKind::OpenAiChat => {
+                            StreamMode::Anthropic(public_model.to_string())
+                        }
+                        _ => StreamMode::Passthrough,
+                    };
+                    return stream_response(fwd.response, state.sse_stall_secs, mode).await;
                 } else {
-                    let bytes = read_bytes_cancel(resp, &cancel).await?;
-                    let (pt, ct) = extract_usage_tokens(&bytes);
+                    let bytes = read_bytes_cancel(fwd.response, &cancel).await?;
+                    let chat = convert_upstream_to_chat(bytes, fwd.body_kind)?;
+                    let (pt, ct) = extract_usage_tokens(&chat);
                     let cost = estimate_cost(
                         pt,
                         ct,
@@ -355,7 +460,7 @@ pub async fn handle_anthropic_messages(
                         ct,
                         cost,
                     );
-                    let anth = claude::openai_to_anthropic(&bytes, public_model)?;
+                    let anth = claude::openai_to_anthropic(&chat, public_model)?;
                     return Ok(json_bytes_response(StatusCode::OK, anth));
                 }
             }
@@ -419,7 +524,7 @@ pub async fn handle_responses(
         }
         let start = Instant::now();
         match forward_chat_completions(state, target, chat_body.clone(), stream, &cancel).await {
-            Ok(resp) => {
+            Ok(fwd) => {
                 let latency = start.elapsed().as_millis() as i64;
                 state.cooldown.clear(&target.connection.id);
                 if stream {
@@ -434,10 +539,25 @@ pub async fn handle_responses(
                         None,
                     );
                     cancel_guard.disarm();
-                    return stream_response(resp, state.sse_stall_secs, StreamMode::Responses).await;
+                    let mode = match fwd.body_kind {
+                        UpstreamBodyKind::OpenAiChat => StreamMode::Responses,
+                        _ => StreamMode::Passthrough,
+                    };
+                    return stream_response(fwd.response, state.sse_stall_secs, mode).await;
                 } else {
-                    let bytes = read_bytes_cancel(resp, &cancel).await?;
-                    let (pt, ct) = extract_usage_tokens(&bytes);
+                    let bytes = read_bytes_cancel(fwd.response, &cancel).await?;
+                    // If upstream already returned Responses, pass through; else wrap chat.
+                    let out = match fwd.body_kind {
+                        UpstreamBodyKind::OpenAiResponses => bytes,
+                        other => {
+                            let chat = convert_upstream_to_chat(bytes, other)?;
+                            responses::chat_to_responses(&chat, public_model)?
+                        }
+                    };
+                    let (pt, ct) = extract_usage_tokens(
+                        // usage may be responses-shaped; best-effort from chat conversion
+                        &out,
+                    );
                     let cost = estimate_cost(
                         pt,
                         ct,
@@ -454,7 +574,6 @@ pub async fn handle_responses(
                         ct,
                         cost,
                     );
-                    let out = responses::chat_to_responses(&bytes, public_model)?;
                     return Ok(json_bytes_response(StatusCode::OK, out));
                 }
             }

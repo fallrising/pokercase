@@ -5,6 +5,134 @@ use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
 
+/// Convert Chat Completions request → Responses request (for Codex / Grok upstreams).
+pub fn chat_to_responses_request(body: &Bytes) -> AppResult<Bytes> {
+    let v: Value = serde_json::from_slice(body)
+        .map_err(|e| AppError::BadRequest(format!("invalid JSON body: {e}")))?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| AppError::BadRequest("body must be a JSON object".into()))?;
+
+    let model = obj
+        .get("model")
+        .and_then(|m| m.as_str())
+        .ok_or_else(|| AppError::BadRequest("model is required".into()))?;
+
+    let mut instructions: Option<String> = None;
+    let mut input: Vec<Value> = Vec::new();
+
+    if let Some(messages) = obj.get("messages").and_then(|m| m.as_array()) {
+        for m in messages {
+            let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+            let content = m.get("content").cloned().unwrap_or(Value::Null);
+            let text = match &content {
+                Value::String(s) => s.clone(),
+                Value::Array(blocks) => blocks
+                    .iter()
+                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                other => other.to_string(),
+            };
+            if role == "system" {
+                instructions = Some(match instructions {
+                    Some(prev) => format!("{prev}\n{text}"),
+                    None => text,
+                });
+            } else {
+                input.push(json!({
+                    "type": "message",
+                    "role": role,
+                    "content": [{"type": "input_text", "text": text}]
+                }));
+            }
+        }
+    }
+
+    let mut out = json!({
+        "model": model,
+        "input": input,
+        "store": false,
+    });
+    let o = out.as_object_mut().unwrap();
+    if let Some(instr) = instructions {
+        o.insert("instructions".into(), Value::String(instr));
+    }
+    if let Some(s) = obj.get("stream") {
+        o.insert("stream".into(), s.clone());
+    }
+    if let Some(mt) = obj.get("max_tokens") {
+        o.insert("max_output_tokens".into(), mt.clone());
+    }
+    if let Some(t) = obj.get("temperature") {
+        o.insert("temperature".into(), t.clone());
+    }
+    if let Some(tools) = obj.get("tools") {
+        o.insert("tools".into(), tools.clone());
+    }
+
+    Ok(Bytes::from(serde_json::to_vec(&out)?))
+}
+
+/// Convert Responses JSON response → Chat Completions JSON (non-stream).
+pub fn responses_body_to_chat(body: &Bytes) -> AppResult<Bytes> {
+    let v: Value = serde_json::from_slice(body)
+        .map_err(|e| AppError::BadRequest(format!("upstream JSON: {e}")))?;
+
+    // Prefer structured output[].content[].text
+    let mut text = String::new();
+    if let Some(output) = v.get("output").and_then(|o| o.as_array()) {
+        for item in output {
+            if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
+                for block in content {
+                    if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                        text.push_str(t);
+                    }
+                }
+            }
+        }
+    }
+    if text.is_empty() {
+        if let Some(t) = v.pointer("/output_text").and_then(|t| t.as_str()) {
+            text = t.to_string();
+        }
+    }
+
+    let id = v
+        .get("id")
+        .and_then(|i| i.as_str())
+        .unwrap_or("chatcmpl-from-resp");
+    let model = v
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or("unknown");
+    let input_tokens = v
+        .pointer("/usage/input_tokens")
+        .and_then(|n| n.as_i64())
+        .unwrap_or(0);
+    let output_tokens = v
+        .pointer("/usage/output_tokens")
+        .and_then(|n| n.as_i64())
+        .unwrap_or(0);
+
+    let out = json!({
+        "id": id.replace("resp_", "chatcmpl-"),
+        "object": "chat.completion",
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": text},
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens
+        }
+    });
+    Ok(Bytes::from(serde_json::to_vec(&out)?))
+}
+
 /// Convert Responses request body to Chat Completions.
 pub fn responses_to_chat(body: &Bytes) -> AppResult<Bytes> {
     let v: Value = serde_json::from_slice(body)

@@ -5,6 +5,7 @@ mod config;
 mod cooldown;
 mod error;
 mod http_client;
+mod providers;
 mod proxy;
 mod resolve;
 mod responses;

@@ -5,6 +5,134 @@ use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
 
+/// Convert OpenAI chat-completions body → Anthropic messages body (for Claude OAuth upstream).
+pub fn openai_to_anthropic_request(body: &Bytes) -> AppResult<Bytes> {
+    let v: Value = serde_json::from_slice(body)
+        .map_err(|e| AppError::BadRequest(format!("invalid JSON body: {e}")))?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| AppError::BadRequest("body must be a JSON object".into()))?;
+
+    let model = obj
+        .get("model")
+        .and_then(|m| m.as_str())
+        .ok_or_else(|| AppError::BadRequest("model is required".into()))?;
+
+    let mut system: Option<String> = None;
+    let mut messages: Vec<Value> = Vec::new();
+
+    if let Some(msgs) = obj.get("messages").and_then(|m| m.as_array()) {
+        for m in msgs {
+            let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+            let content = m.get("content").cloned().unwrap_or(Value::Null);
+            let text = match content {
+                Value::String(s) => s,
+                Value::Array(blocks) => blocks_to_text(&blocks),
+                other => other.to_string(),
+            };
+            if role == "system" {
+                system = Some(match system {
+                    Some(prev) => format!("{prev}\n{text}"),
+                    None => text,
+                });
+            } else if role == "tool" {
+                messages.push(json!({
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": m.get("tool_call_id").and_then(|t| t.as_str()).unwrap_or("tool"), "content": text}]
+                }));
+            } else {
+                let anth_role = if role == "assistant" { "assistant" } else { "user" };
+                messages.push(json!({"role": anth_role, "content": text}));
+            }
+        }
+    }
+
+    let max_tokens = obj
+        .get("max_tokens")
+        .and_then(|n| n.as_u64())
+        .unwrap_or(4096);
+
+    let mut out = json!({
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": messages,
+    });
+    let o = out.as_object_mut().unwrap();
+    if let Some(s) = system {
+        o.insert("system".into(), Value::String(s));
+    }
+    if let Some(stream) = obj.get("stream") {
+        o.insert("stream".into(), stream.clone());
+    }
+    if let Some(t) = obj.get("temperature") {
+        o.insert("temperature".into(), t.clone());
+    }
+
+    Ok(Bytes::from(serde_json::to_vec(&out)?))
+}
+
+/// Convert Anthropic messages response → OpenAI chat completions JSON.
+pub fn anthropic_to_openai_response(body: &Bytes) -> AppResult<Bytes> {
+    let v: Value = serde_json::from_slice(body)
+        .map_err(|e| AppError::BadRequest(format!("upstream JSON: {e}")))?;
+
+    let text = v
+        .get("content")
+        .and_then(|c| c.as_array())
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+
+    let id = v
+        .get("id")
+        .and_then(|i| i.as_str())
+        .unwrap_or("msg_unknown");
+    let model = v
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or("claude");
+    let input_tokens = v
+        .pointer("/usage/input_tokens")
+        .and_then(|n| n.as_i64())
+        .unwrap_or(0);
+    let output_tokens = v
+        .pointer("/usage/output_tokens")
+        .and_then(|n| n.as_i64())
+        .unwrap_or(0);
+    let stop = v
+        .get("stop_reason")
+        .and_then(|s| s.as_str())
+        .unwrap_or("end_turn");
+    let finish = match stop {
+        "end_turn" => "stop",
+        "max_tokens" => "length",
+        "tool_use" => "tool_calls",
+        other => other,
+    };
+
+    let out = json!({
+        "id": id.replace("msg_", "chatcmpl-"),
+        "object": "chat.completion",
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": text},
+            "finish_reason": finish
+        }],
+        "usage": {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens
+        }
+    });
+    Ok(Bytes::from(serde_json::to_vec(&out)?))
+}
+
 /// Convert Anthropic `/v1/messages` body to OpenAI `/v1/chat/completions` body.
 pub fn anthropic_to_openai(body: &Bytes) -> AppResult<Bytes> {
     let v: Value = serde_json::from_slice(body)
