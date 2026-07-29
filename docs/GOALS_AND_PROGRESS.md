@@ -19,7 +19,7 @@ We deliberately “copy homework” on the hot path (auth → resolve model → 
 ```
 CLI tools / IDE  →  /v1/* (proxy)     →  upstream OpenAI-compatible APIs
 Browser          →  /admin (config UI)
-CLI              →  serve | doctor
+CLI              →  serve | doctor | tui
 Data             →  ~/.thinrouter/thinrouter.db  (own schema, not 9router.db)
 ```
 
@@ -70,10 +70,10 @@ Legend: ✅ done · 🟨 partial · ❌ not started · 🚫 deferred (out of sco
 
 | Item | Status | Notes |
 |------|--------|--------|
-| Rust binary + clap (`serve`, `doctor`) | ✅ | |
+| Rust binary + clap (`serve`, `doctor`) | ✅ | also `tui` |
 | axum HTTP server + `/health` | ✅ | |
 | SQLite (WAL) + migrations | ✅ | `~/.thinrouter` |
-| Config via flags / env | ✅ | host, port, data_dir, admin_token |
+| Config via flags / env | ✅ | host, port, data_dir, admin_token, secrets_key, sse_stall |
 | Repo on GitHub | ✅ | `fallrising/pokercase` |
 
 ### Phase 1 — Thin proxy
@@ -86,37 +86,37 @@ Legend: ✅ done · 🟨 partial · ❌ not started · 🚫 deferred (out of sco
 | Model resolve (route / `conn/model` / default) | ✅ | unit tests for resolve |
 | OpenAI-compatible forward | ✅ | rewrite `model` + Bearer |
 | Ordered fallback | ✅ | 401/402/403/408/429/5xx |
-| Usage event logging | ✅ | coarse status/latency/error |
-| Real upstream end-to-end | 🟨 | smoke with dead upstream only; **real API key not verified yet** |
-| SSE stall timeout | ❌ | Go reference has this |
-| Round-robin strategy | ❌ | only sequential fallback |
-| Connection cooldown / model lock | ❌ | |
+| Usage event logging | ✅ | status/latency/error + tokens/cost |
+| Real upstream end-to-end | 🟨 | **mock e2e ✅**; real API key still user-side |
+| SSE stall timeout | ✅ | `--sse-stall-secs` / env (default 90) |
+| Round-robin strategy | ✅ | route `strategy: round_robin` |
+| Connection cooldown / model lock | ✅ | in-memory after 429/auth/5xx |
 
 ### Phase 1.5 — Web admin
 
 | Item | Status | Notes |
 |------|--------|--------|
-| Dashboard | ✅ | stats + sample curl |
-| Connections CRUD (UI) | 🟨 | create + delete; no full edit form |
-| Routes CRUD (UI) | 🟨 | single-target create + delete |
-| Multi-target route via API | ✅ | `POST /admin/api/routes` with targets[] |
-| Multi-target editor in UI | ❌ | documented workaround: JSON API |
+| Dashboard | ✅ | stats + sample curl + est. cost |
+| Connections CRUD (UI) | ✅ | create + edit + delete + prices |
+| Routes CRUD (UI) | ✅ | multi-target (5 slots) + edit + delete |
+| Multi-target route via API | ✅ | `POST/PUT /admin/api/routes` |
+| Multi-target editor in UI | ✅ | ordered slots 1–5 |
 | API keys UI | ✅ | create (show secret once) + delete |
-| Usage page | ✅ | last N events |
+| Usage page | ✅ | events + tokens + cost total |
 | Connection test API | ✅ | `POST .../connections/{id}/test` |
-| Connection test button in UI | ❌ | |
-| Admin token login in UI | ❌ | header `x-admin-token` for API only |
+| Connection test button in UI | ✅ | |
+| Admin token login in UI | ✅ | `/admin/login` + cookie |
 
-### Phase 2 — Experience (planned)
+### Phase 2 — Experience
 
 | Item | Status | Notes |
 |------|--------|--------|
-| Claude `POST /v1/messages` + format translation | ❌ | needed if clients speak Anthropic natively |
-| TUI (`ratatui`) | ❌ | connections / routes / recent requests |
-| Stronger error classify + backoff | ❌ | align more with Go |
-| Usage charts / cost | ❌ | |
-| Docker image / release binaries | ❌ | |
-| Broader automated tests (mock stream e2e) | 🟨 | resolve tests only |
+| Claude `POST /v1/messages` + format translation | ✅ | non-stream + stream SSE map |
+| TUI (`ratatui`) | ✅ | `thinrouter tui` |
+| Stronger error classify + backoff | ✅ | cooldown map by status class |
+| Usage charts / cost | 🟨 | cost estimate from $/1M rates; no charts |
+| Docker image / release binaries | ✅ | Dockerfile + compose + GH release workflow |
+| Broader automated tests (mock stream e2e) | ✅ | `tests/e2e_mock.rs` |
 
 ### Phase 3 — Explicitly deferred
 
@@ -129,10 +129,12 @@ Legend: ✅ done · 🟨 partial · ❌ not started · 🚫 deferred (out of sco
 ## 5. What works today (user-facing)
 
 1. `cargo run -- serve` → proxy on `http://127.0.0.1:20128/v1`, admin on `/admin`.
-2. Add an OpenAI-compatible **connection** (base URL + API key + default model).
-3. Create a **route** public model name pointing at that connection.
-4. Optionally create a **gateway API key**.
-5. Call:
+2. Add an OpenAI-compatible **connection** (base URL + API key + default model; optional $/1M prices).
+3. Create a **route** with one or more targets (`fallback` or `round_robin`).
+4. Optionally create a **gateway API key**; optionally set `THINROUTER_ADMIN_TOKEN`.
+5. Call OpenAI or Anthropic-shaped APIs (see [CLIENTS.md](./CLIENTS.md)).
+6. `thinrouter tui` for terminal overview; Docker via `docker compose up --build`.
+7. Optional `THINROUTER_SECRETS_KEY` encrypts connection API keys at rest.
 
 ```bash
 curl -s http://127.0.0.1:20128/v1/chat/completions \
@@ -141,50 +143,44 @@ curl -s http://127.0.0.1:20128/v1/chat/completions \
   -d '{"model":"your-route","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-6. Client `model` values:
-   - `route-name` → route targets (fallback order)
-   - `connection/model` → direct upstream model
-   - `connection` → connection `default_model`
-
-7. Multi-target fallback can be created via admin JSON API (see README).
-
 ---
 
 ## 6. Remaining work (backlog)
 
-Ordered by practical priority for “daily driver” use:
-
 ### P0 — Validate
 
-- [ ] End-to-end with a **real** OpenAI-compatible API key (stream + non-stream)
+- [x] Mock end-to-end (stream + non-stream + Anthropic + fallback) — automated
+- [ ] End-to-end with a **real** OpenAI-compatible API key (user must supply key)
 - [ ] Confirm a real IDE/CLI (Cursor / Claude Code OpenAI mode / curl) against this proxy
 
 ### P1 — Protocol / clients
 
-- [ ] Claude `/v1/messages` request/response (+ stream) translation if Anthropic-native clients are required
-- [ ] Document exact settings for each client we care about
+- [x] Claude `/v1/messages` request/response (+ stream) translation
+- [x] Document exact settings for each client we care about → [CLIENTS.md](./CLIENTS.md)
 
 ### P2 — Admin UX
 
-- [ ] Edit connection / route in UI
-- [ ] Multi-target route editor (ordered list) in UI
-- [ ] “Test connection” button on Connections page
-- [ ] Optional simple admin auth for non-loopback binds
+- [x] Edit connection / route in UI
+- [x] Multi-target route editor (ordered list) in UI
+- [x] “Test connection” button on Connections page
+- [x] Optional simple admin auth for non-loopback binds (token + login cookie)
 
 ### P3 — Reliability & ops
 
-- [ ] SSE stall detection
-- [ ] Cooldown / model lock after rate limits
-- [ ] Mock upstream e2e tests (including streaming)
-- [ ] Docker + GitHub Release binaries
-- [ ] Align naming: crate `thinrouter` vs repo `pokercase` (rename or document only)
+- [x] SSE stall detection
+- [x] Cooldown / model lock after rate limits
+- [x] Mock upstream e2e tests (including streaming)
+- [x] Docker + GitHub Release binaries (workflow; run on tag `v*`)
+- [x] Align naming: crate `thinrouter` vs repo `pokercase` (documented, not renamed)
 
 ### P4 — Nice-to-have
 
-- [ ] TUI
-- [ ] Round-robin
-- [ ] Encrypt secrets at rest / OS keyring
-- [ ] Cost estimation from usage
+- [x] TUI
+- [x] Round-robin
+- [x] Encrypt secrets at rest (`THINROUTER_SECRETS_KEY`; not OS keyring)
+- [x] Cost estimation from usage (token × connection $/1M rates)
+- [ ] Usage charts (visual)
+- [ ] OS keyring integration
 
 ---
 
@@ -207,17 +203,23 @@ We implement **behavior-inspired** code in Rust; we do not vendor upstream sourc
 
 ```
 src/
-  main.rs       CLI
-  config.rs     data dir / listen
+  main.rs       CLI (serve | doctor | tui)
+  config.rs     data dir / listen / secrets / stall
   store.rs      SQLite
-  resolve.rs    model → targets
-  proxy.rs      forward + fallback + SSE
-  server.rs     /v1 + middleware
+  resolve.rs    model → targets + strategy
+  proxy.rs      forward + fallback + SSE stall + RR order
+  cooldown.rs   in-memory connection cooldown
+  claude.rs     Anthropic ↔ OpenAI translate
+  secrets.rs    optional AES-GCM at-rest key encrypt
+  server.rs     /v1 + /v1/messages + middleware
   admin.rs      /admin/api/*
-  web.rs        /admin pages
+  web.rs        /admin pages + login
+  tui_app.rs    ratatui overview
   templates.rs  minijinja
 templates/      HTML + CSS
-docs/           this document
+docs/           goals + clients
+tests/          mock e2e
+Dockerfile      multi-stage image
 ```
 
 ---
@@ -229,21 +231,25 @@ docs/           this document
 | 2026-07-28 | Architecture plan: thin proxy + web config; Rust; own schema |
 | 2026-07-28 | Phase 0–1.5 implemented (proxy + admin UI + API) |
 | 2026-07-28 | Published as `fallrising/pokercase` |
-| 2026-07-28 | This goals & progress doc |
+| 2026-07-28 | Goals & progress doc |
+| 2026-07-28 | Full backlog pass: Claude messages, admin UX, SSE stall, cooldown, RR, mock e2e, Docker/release, TUI, secrets encrypt, cost estimate |
 
 ---
 
 ## 10. How to continue
 
-1. Read this file + `README.md`.
-2. Pick the next P0/P1 item from §6.
-3. After meaningful progress, update the status tables and backlog checkboxes in this file, then commit.
+1. Read this file + `README.md` + `docs/CLIENTS.md`.
+2. Remaining user-side items: real API key smoke + IDE confirmation (P0).
+3. Optional polish: usage charts, OS keyring.
+4. After meaningful progress, update this file, then commit.
 
 Suggested first session after a break:
 
 ```bash
 cd thinrouter   # or clone fallrising/pokercase
+cargo test
 cargo run -- serve
 # open http://127.0.0.1:20128/admin
-# wire a real key and verify stream
+# wire a real key and verify stream + non-stream
+# try: cargo run -- tui
 ```
