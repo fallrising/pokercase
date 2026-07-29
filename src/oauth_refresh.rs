@@ -60,6 +60,7 @@ pub async fn refresh_connection(store: &Store, conn: &ConnectionRow) -> AppResul
         "codex" | "cx" | "openai_codex" => refresh_codex(refresh).await?,
         "grok" | "xai" | "grok_cli" => refresh_xai(refresh).await?,
         "agy" | "ag" | "antigravity" => refresh_google_antigravity(refresh).await?,
+        "cursor" | "cu" => refresh_cursor(refresh).await?,
         other => {
             return Err(AppError::BadRequest(format!(
                 "refresh not implemented for provider '{other}'"
@@ -223,6 +224,54 @@ async fn refresh_xai(refresh_token: &str) -> AppResult<RefreshedTokens> {
         expires_at: tok.expires_in.map(|s| {
             (Utc::now() + Duration::seconds(s)).to_rfc3339()
         }),
+    })
+}
+
+async fn refresh_cursor(refresh_token: &str) -> AppResult<RefreshedTokens> {
+    #[derive(Deserialize)]
+    struct Tok {
+        access_token: String,
+        #[serde(default)]
+        refresh_token: Option<String>,
+        #[serde(default)]
+        expires_in: Option<i64>,
+        #[serde(default)]
+        should_logout: Option<bool>,
+    }
+    let client = crate::http_client::build_http_client().map_err(AppError::Internal)?;
+    let resp = client
+        .post("https://api2.cursor.sh/oauth/token")
+        .header("content-type", "application/json")
+        .header("accept", "application/json")
+        .json(&serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }))
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("cursor refresh: {e}")))?;
+    if !resp.status().is_success() {
+        let t = resp.text().await.unwrap_or_default();
+        return Err(AppError::Upstream {
+            status: 401,
+            body: format!("cursor refresh failed: {t}"),
+        });
+    }
+    let tok: Tok = resp
+        .json()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("cursor refresh json: {e}")))?;
+    if tok.should_logout == Some(true) {
+        return Err(AppError::Upstream {
+            status: 401,
+            body: "cursor refresh says shouldLogout — re-login in Cursor".into(),
+        });
+    }
+    Ok(RefreshedTokens {
+        access_token: tok.access_token,
+        // Cursor often does not rotate refresh_token; keep old one.
+        refresh_token: tok.refresh_token,
+        expires_at: tok.expires_in.map(|s| (Utc::now() + Duration::seconds(s)).to_rfc3339()),
     })
 }
 

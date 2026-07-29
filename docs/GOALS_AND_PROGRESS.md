@@ -80,7 +80,9 @@ Legend: ✅ done · 🟨 partial · ❌ not started · 🚫 deferred
 5. [x] OAuth **refresh** for codex / claude / grok / agy (+ 401 retry)
 6. [x] `thinrouter import-local --routes --refresh`
 7. [x] Antigravity `loadCodeAssist` + `generateContent` executor
-8. [ ] Cursor protobuf / AgentService executor
+8. [x] Cursor OAuth **refresh** (`api2.cursor.sh/oauth/token`)
+9. [x] Claude subscription integration notes (`docs/CLAUDE_SUBSCRIPTION.md`)
+10. [ ] Cursor protobuf / AgentService **chat** executor
 
 ### P1 — Protocol & cost
 

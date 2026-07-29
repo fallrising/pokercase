@@ -7,7 +7,7 @@ Personal subscription / free upstreams for **Layer A** (thinrouter).
 | ID | Aliases | Status | Format | Default base |
 |----|---------|--------|--------|--------------|
 | `codex` | `cx` | **active** | OpenAI Responses | `https://chatgpt.com/backend-api/codex/responses` |
-| `claude` | `cc`, `anthropic` | **active** | Anthropic Messages | `https://api.anthropic.com/v1/messages` |
+| `claude` | `cc`, `anthropic` | **active** | Anthropic Messages | `https://api.anthropic.com/v1/messages` （订阅原理见 [CLAUDE_SUBSCRIPTION.md](./CLAUDE_SUBSCRIPTION.md)） |
 | `cursor` | `cu` | **partial** | Stub (import only; Connect/protobuf pending) | `https://api2.cursor.sh` |
 | `grok` | `xai`, `grok_cli` | **active** | OpenAI Responses | `https://cli-chat-proxy.grok.com/v1` |
 | `opencode` | `oc` | **active** | OpenAI Chat | `https://opencode.ai/zen/v1` |
@@ -90,7 +90,7 @@ export THINROUTER_AGY_CLIENT_ID='…'
 export THINROUTER_AGY_CLIENT_SECRET='…'
 ```
 
-**cursor** refresh is not implemented yet.
+**cursor** refresh: `POST https://api2.cursor.sh/oauth/token` with `grant_type=refresh_token` (implemented). Chat forward still needs Connect/protobuf executor.
 
 ### Local import
 

@@ -163,6 +163,24 @@ fn read_codex_model() -> Option<String> {
 }
 
 fn import_claude(store: &Store, make_routes: bool) -> ImportResult {
+    // 1) Official long-lived token for CI / headless (subscription-backed)
+    if let Ok(tok) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
+        let tok = tok.trim();
+        if !tok.is_empty() {
+            return upsert(
+                store,
+                "local-claude",
+                "claude",
+                tok,
+                None,
+                None,
+                Some(r#"{"source":"CLAUDE_CODE_OAUTH_TOKEN"}"#),
+                Some("claude-sonnet-4-5-20250929"),
+                make_routes,
+            );
+        }
+    }
+
     let path = home().join(".claude/.credentials.json");
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => s,
@@ -171,7 +189,10 @@ fn import_claude(store: &Store, make_routes: bool) -> ImportResult {
                 provider: "claude".into(),
                 name: "local-claude".into(),
                 ok: false,
-                detail: format!("missing {}: {e}", path.display()),
+                detail: format!(
+                    "missing {} ({e}); run `claude` /login or `claude setup-token` then set CLAUDE_CODE_OAUTH_TOKEN — see docs/CLAUDE_SUBSCRIPTION.md",
+                    path.display()
+                ),
             };
         }
     };
@@ -187,22 +208,31 @@ fn import_claude(store: &Store, make_routes: bool) -> ImportResult {
         }
     };
     let oauth = &v["claudeAiOauth"];
-    let access = oauth.get("accessToken").and_then(|t| t.as_str()).unwrap_or("");
-    let refresh = oauth.get("refreshToken").and_then(|t| t.as_str());
+    let access = oauth
+        .get("accessToken")
+        .or_else(|| oauth.get("access_token"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    let refresh = oauth
+        .get("refreshToken")
+        .or_else(|| oauth.get("refresh_token"))
+        .and_then(|t| t.as_str())
+        .filter(|s| !s.is_empty());
     let exp = oauth
         .get("expiresAt")
+        .or_else(|| oauth.get("expires_at"))
         .map(|e| match e {
             Value::Number(n) => n.to_string(),
             Value::String(s) => s.clone(),
             _ => String::new(),
         })
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty() && s != "0");
     if access.is_empty() {
         return ImportResult {
             provider: "claude".into(),
             name: "local-claude".into(),
             ok: false,
-            detail: "no accessToken".into(),
+            detail: "credentials present but accessToken empty (OAuth session expired). Run `claude` then /login, or `claude setup-token` + CLAUDE_CODE_OAUTH_TOKEN. See docs/CLAUDE_SUBSCRIPTION.md".into(),
         };
     }
     upsert(
