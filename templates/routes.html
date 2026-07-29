@@ -17,27 +17,90 @@
         <a href="/admin/keys">API Keys</a>
         <a href="/admin/usage">Usage</a>
       </nav>
+      {% if admin_protected %}
+      <form method="post" action="/admin/logout" class="logout"><button type="submit" class="ghost">Logout</button></form>
+      {% endif %}
     </aside>
     <main class="content">
-      <h1>Routes</h1>
-      <p class="muted">Public model name clients use → ordered connection targets (fallback).</p>
+      <h1>{% if edit %}Edit route{% else %}Routes{% endif %}</h1>
+      <p class="muted">Public model name → ordered connection targets. Strategy: <code>fallback</code> or <code>round_robin</code>.</p>
 
       <section class="panel">
-        <h2>Add route</h2>
+        <h2>{% if edit %}Update route{% else %}Add route{% endif %}</h2>
         {% if connections %}
-        <form method="post" action="/admin/routes/new" class="form-grid">
-          <label>Public model <input name="public_model" required placeholder="cheap" /></label>
-          <label>Connection
-            <select name="connection_id" required>
-              {% for c in connections %}
-              <option value="{{ c.id }}">{{ c.name }}{% if c.default_model %} ({{ c.default_model }}){% endif %}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <label>Model override <input name="model_override" placeholder="leave empty = connection default" /></label>
-          <button type="submit">Create</button>
+        <form method="post" action="{% if edit %}/admin/routes/{{ form.id }}/update{% else %}/admin/routes/new{% endif %}" class="form-stack">
+          <div class="form-grid">
+            <label>Public model <input name="public_model" required placeholder="cheap" value="{{ form.public_model }}" /></label>
+            <label>Strategy
+              <select name="strategy">
+                <option value="fallback" {% if form.strategy == "fallback" %}selected{% endif %}>fallback</option>
+                <option value="round_robin" {% if form.strategy == "round_robin" %}selected{% endif %}>round_robin</option>
+              </select>
+            </label>
+          </div>
+          <h3 class="subhead">Targets (order = priority; empty slots ignored)</h3>
+
+          <div class="form-grid target-row">
+            <label>Target 1 connection
+              <select name="t0_conn">
+                <option value="">—</option>
+                {% for c in connections %}
+                <option value="{{ c.id }}" {% if form.t0_conn == c.id %}selected{% endif %}>{{ c.name }}{% if c.default_model %} ({{ c.default_model }}){% endif %}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Model override <input name="t0_model" placeholder="empty = connection default" value="{{ form.t0_model }}" /></label>
+          </div>
+          <div class="form-grid target-row">
+            <label>Target 2 connection
+              <select name="t1_conn">
+                <option value="">—</option>
+                {% for c in connections %}
+                <option value="{{ c.id }}" {% if form.t1_conn == c.id %}selected{% endif %}>{{ c.name }}{% if c.default_model %} ({{ c.default_model }}){% endif %}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Model override <input name="t1_model" placeholder="empty = connection default" value="{{ form.t1_model }}" /></label>
+          </div>
+          <div class="form-grid target-row">
+            <label>Target 3 connection
+              <select name="t2_conn">
+                <option value="">—</option>
+                {% for c in connections %}
+                <option value="{{ c.id }}" {% if form.t2_conn == c.id %}selected{% endif %}>{{ c.name }}{% if c.default_model %} ({{ c.default_model }}){% endif %}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Model override <input name="t2_model" placeholder="empty = connection default" value="{{ form.t2_model }}" /></label>
+          </div>
+          <div class="form-grid target-row">
+            <label>Target 4 connection
+              <select name="t3_conn">
+                <option value="">—</option>
+                {% for c in connections %}
+                <option value="{{ c.id }}" {% if form.t3_conn == c.id %}selected{% endif %}>{{ c.name }}{% if c.default_model %} ({{ c.default_model }}){% endif %}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Model override <input name="t3_model" placeholder="empty = connection default" value="{{ form.t3_model }}" /></label>
+          </div>
+          <div class="form-grid target-row">
+            <label>Target 5 connection
+              <select name="t4_conn">
+                <option value="">—</option>
+                {% for c in connections %}
+                <option value="{{ c.id }}" {% if form.t4_conn == c.id %}selected{% endif %}>{{ c.name }}{% if c.default_model %} ({{ c.default_model }}){% endif %}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Model override <input name="t4_model" placeholder="empty = connection default" value="{{ form.t4_model }}" /></label>
+          </div>
+
+          <div class="form-actions">
+            <button type="submit">{% if edit %}Save{% else %}Create{% endif %}</button>
+            {% if edit %}<a class="btn-link" href="/admin/routes">Cancel</a>{% endif %}
+          </div>
         </form>
-        <p class="muted small">MVP creates single-target routes. Add multi-target fallback via <code>POST /admin/api/routes</code> JSON API.</p>
         {% else %}
         <p class="muted">Create a connection first.</p>
         {% endif %}
@@ -70,7 +133,8 @@
                   {% endfor %}
                 </ol>
               </td>
-              <td>
+              <td class="actions">
+                <a class="btn-link" href="/admin/routes/{{ r.id }}/edit">Edit</a>
                 <form method="post" action="/admin/routes/{{ r.id }}/delete" onsubmit="return confirm('Delete route?')">
                   <button type="submit" class="danger">Delete</button>
                 </form>

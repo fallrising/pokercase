@@ -17,6 +17,9 @@
         <a href="/admin/keys">API Keys</a>
         <a href="/admin/usage">Usage</a>
       </nav>
+      {% if admin_protected %}
+      <form method="post" action="/admin/logout" class="logout"><button type="submit" class="ghost">Logout</button></form>
+      {% endif %}
     </aside>
     <main class="content">
       <h1>Dashboard</h1>
@@ -25,11 +28,12 @@
         <div class="card"><div class="label">Routes</div><div class="value">{{ stats.routes }}</div></div>
         <div class="card"><div class="label">API Keys</div><div class="value">{{ stats.api_keys }}</div></div>
         <div class="card"><div class="label">Usage events</div><div class="value">{{ stats.usage_events }}</div></div>
+        <div class="card"><div class="label">Est. cost</div><div class="value small-val">${{ stats.estimated_cost_usd }}</div></div>
       </div>
       <section class="panel">
         <h2>Endpoint</h2>
         <code class="codeblock">{{ endpoint }}</code>
-        <p class="muted">Point Claude Code / Cursor / curl at this base URL. Model: <code>route-name</code> or <code>connection/model</code>.</p>
+        <p class="muted">OpenAI: <code>{{ endpoint }}/chat/completions</code> · Anthropic: <code>{{ endpoint }}/messages</code></p>
         <pre class="codeblock">curl -s {{ endpoint }}/chat/completions \
   -H "Authorization: Bearer YOUR_KEY" \
   -H "Content-Type: application/json" \
@@ -39,7 +43,7 @@
         <h2>Quick start</h2>
         <ol>
           <li>Add a <a href="/admin/connections">Connection</a> (base URL + API key)</li>
-          <li>Create a <a href="/admin/routes">Route</a> that maps a public model name to that connection</li>
+          <li>Create a <a href="/admin/routes">Route</a> that maps a public model name to targets</li>
           <li>Optionally create an <a href="/admin/keys">API Key</a> (if none exist, /v1 is open for bootstrap)</li>
         </ol>
       </section>

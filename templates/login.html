@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin login · thinrouter</title>
+  <link rel="stylesheet" href="/admin/static/style.css" />
+</head>
+<body class="login-body">
+  <main class="login-card">
+    <h1>Admin login</h1>
+    <p class="muted">This instance has <code>THINROUTER_ADMIN_TOKEN</code> set. Enter the token to continue.</p>
+    {% if error %}
+    <p class="err-text">Invalid token.</p>
+    {% endif %}
+    <form method="post" action="/admin/login" class="form-stack">
+      <label>Admin token <input name="token" type="password" required autofocus /></label>
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>

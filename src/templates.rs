@@ -20,6 +20,8 @@ pub fn env() -> &'static Environment<'static> {
             .unwrap();
         env.add_template("usage", include_str!("../templates/usage.html"))
             .unwrap();
+        env.add_template("login", include_str!("../templates/login.html"))
+            .unwrap();
         env
     })
 }

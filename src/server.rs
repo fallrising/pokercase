@@ -1,4 +1,6 @@
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -16,7 +18,9 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 
 use crate::admin;
+use crate::claude;
 use crate::config::AppConfig;
+use crate::cooldown::CooldownMap;
 use crate::error::{AppError, AppResult};
 use crate::proxy::{self, ProxyState};
 use crate::resolve;
@@ -30,8 +34,32 @@ pub struct AppState {
     pub proxy: ProxyState,
 }
 
+pub fn build_app(state: AppState) -> Router {
+    let v1 = Router::new()
+        .route("/chat/completions", post(chat_completions))
+        .route("/messages", post(anthropic_messages))
+        .route("/models", get(list_models))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_api_key,
+        ));
+
+    Router::new()
+        .route("/health", get(health))
+        .nest("/v1", v1)
+        // also accept without /v1 prefix (some tools)
+        .route("/chat/completions", post(chat_completions))
+        .route("/messages", post(anthropic_messages))
+        .route("/models", get(list_models))
+        .merge(admin::router())
+        .merge(web::router())
+        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
 pub async fn run(cfg: AppConfig) -> Result<()> {
-    let store = Store::open(&cfg.db_path())?;
+    let store = Store::open(&cfg.db_path(), cfg.secrets_key.clone())?;
     let http = Client::builder()
         .timeout(Duration::from_secs(300))
         .connect_timeout(Duration::from_secs(15))
@@ -45,28 +73,13 @@ pub async fn run(cfg: AppConfig) -> Result<()> {
         proxy: ProxyState {
             http,
             store: store.clone(),
+            cooldown: CooldownMap::new(),
+            rr_counter: Arc::new(AtomicU64::new(0)),
+            sse_stall_secs: cfg.sse_stall_secs,
         },
     };
 
-    let v1 = Router::new()
-        .route("/chat/completions", post(chat_completions))
-        .route("/models", get(list_models))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_api_key,
-        ));
-
-    let app = Router::new()
-        .route("/health", get(health))
-        .nest("/v1", v1)
-        // also accept without /v1 prefix (some tools)
-        .route("/chat/completions", post(chat_completions))
-        .route("/models", get(list_models))
-        .merge(admin::router())
-        .merge(web::router())
-        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+    let app = build_app(state);
 
     let addr: SocketAddr = cfg
         .listen_addr()
@@ -74,6 +87,7 @@ pub async fn run(cfg: AppConfig) -> Result<()> {
         .with_context(|| format!("invalid listen addr {}", cfg.listen_addr()))?;
     info!(%addr, data_dir = %cfg.data_dir.display(), "thinrouter listening");
     info!("  proxy  : http://{addr}/v1/chat/completions");
+    info!("  claude : http://{addr}/v1/messages");
     info!("  admin  : http://{addr}/admin");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -97,13 +111,11 @@ async fn require_api_key(
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    // Allow unauthenticated only when nested under paths that don't use this layer.
     let key = extract_api_key(request.headers());
     match key {
         Some(k) if state.store.verify_api_key(&k)? => Ok(next.run(request).await),
         Some(_) => Err(AppError::Unauthorized),
         None => {
-            // bootstrap: no keys configured → open
             if state.store.verify_api_key("")? {
                 Ok(next.run(request).await)
             } else {
@@ -135,19 +147,39 @@ async fn chat_completions(
     headers: HeaderMap,
     body: Bytes,
 ) -> AppResult<Response> {
-    // auth for non-nested route
-    if !path_already_authed(&headers) {
-        // when mounted both under /v1 (with middleware) and root, root needs auth
-    }
     ensure_api_key(&state, &headers)?;
 
     let (public_model, stream) = proxy::extract_model_and_stream(&body)?;
-    let targets = resolve::resolve_targets(&state.store, &public_model)?;
-    proxy::handle_chat_with_fallback(&state.proxy, &public_model, body, stream, targets).await
+    let resolved = resolve::resolve_targets(&state.store, &public_model)?;
+    proxy::handle_chat_with_fallback(
+        &state.proxy,
+        &public_model,
+        body,
+        stream,
+        resolved.targets,
+        &resolved.strategy,
+    )
+    .await
 }
 
-fn path_already_authed(_headers: &HeaderMap) -> bool {
-    false
+async fn anthropic_messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> AppResult<Response> {
+    ensure_api_key(&state, &headers)?;
+
+    let (public_model, stream) = claude::extract_anthropic_model_stream(&body)?;
+    let resolved = resolve::resolve_targets(&state.store, &public_model)?;
+    proxy::handle_anthropic_messages(
+        &state.proxy,
+        &public_model,
+        body,
+        stream,
+        resolved.targets,
+        &resolved.strategy,
+    )
+    .await
 }
 
 fn ensure_api_key(state: &AppState, headers: &HeaderMap) -> AppResult<()> {

@@ -17,9 +17,13 @@
         <a href="/admin/keys">API Keys</a>
         <a href="/admin/usage" class="active">Usage</a>
       </nav>
+      {% if admin_protected %}
+      <form method="post" action="/admin/logout" class="logout"><button type="submit" class="ghost">Logout</button></form>
+      {% endif %}
     </aside>
     <main class="content">
       <h1>Usage</h1>
+      <p class="muted">Estimated total cost (from connection $/1M rates): <strong>${{ cost_total }}</strong></p>
       <section class="panel">
         {% if events %}
         <table>
@@ -30,6 +34,8 @@
               <th>Connection</th>
               <th>Status</th>
               <th>Latency</th>
+              <th>Tokens</th>
+              <th>Cost</th>
               <th>Error</th>
             </tr>
           </thead>
@@ -41,6 +47,8 @@
               <td class="mono">{{ e.connection_id or "—" }}</td>
               <td>{{ e.status or "—" }}</td>
               <td>{% if e.latency_ms %}{{ e.latency_ms }} ms{% else %}—{% endif %}</td>
+              <td class="mono">{% if e.prompt_tokens or e.completion_tokens %}{{ e.prompt_tokens or 0 }}/{{ e.completion_tokens or 0 }}{% else %}—{% endif %}</td>
+              <td>{% if e.estimated_cost_usd is not none %}${{ e.estimated_cost_usd }}{% else %}—{% endif %}</td>
               <td class="error-cell">{{ e.error or "" }}</td>
             </tr>
             {% endfor %}

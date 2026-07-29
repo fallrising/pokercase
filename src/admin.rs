@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use crate::error::{AppError, AppResult};
 use crate::server::AppState;
 use crate::store::ConnectionPublic;
+use crate::web::{admin_authorized, ADMIN_COOKIE};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -29,33 +30,17 @@ pub fn router() -> Router<AppState> {
         .route("/admin/api/routes", get(list_routes).post(create_route))
         .route(
             "/admin/api/routes/{id}",
-            delete(delete_route),
+            get(get_route).put(update_route).delete(delete_route),
         )
         .route("/admin/api/keys", get(list_keys).post(create_key))
-        .route(
-            "/admin/api/keys/{id}",
-            delete(delete_key),
-        )
-        .route(
-            "/admin/api/keys/{id}/enable",
-            post(enable_key),
-        )
-        .route(
-            "/admin/api/keys/{id}/disable",
-            post(disable_key),
-        )
+        .route("/admin/api/keys/{id}", delete(delete_key))
+        .route("/admin/api/keys/{id}/enable", post(enable_key))
+        .route("/admin/api/keys/{id}/disable", post(disable_key))
         .route("/admin/api/usage", get(usage))
 }
 
 fn check_admin(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
-    let Some(token) = &state.cfg.admin_token else {
-        return Ok(());
-    };
-    let provided = headers
-        .get("x-admin-token")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if provided == token {
+    if admin_authorized(state, headers) {
         Ok(())
     } else {
         Err(AppError::Unauthorized)
@@ -97,6 +82,8 @@ pub struct ConnectionInput {
     pub priority: i64,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    pub input_price_per_m: Option<f64>,
+    pub output_price_per_m: Option<f64>,
 }
 
 fn default_priority() -> i64 {
@@ -128,6 +115,8 @@ async fn create_connection(
         input.default_model.as_deref(),
         input.priority,
         input.enabled,
+        input.input_price_per_m,
+        input.output_price_per_m,
     )?;
     Ok((
         StatusCode::CREATED,
@@ -160,10 +149,12 @@ async fn update_connection(
         .get_connection(&id)?
         .ok_or_else(|| AppError::NotFound("connection not found".into()))?;
     let api_key = if input.api_key.is_empty() {
-        existing.api_key
+        // empty means keep existing (store handles '' as keep when encrypted write)
+        String::new()
     } else {
         input.api_key
     };
+    let _ = existing;
     let row = state.store.upsert_connection(
         Some(id),
         input.name.trim(),
@@ -172,6 +163,8 @@ async fn update_connection(
         input.default_model.as_deref(),
         input.priority,
         input.enabled,
+        input.input_price_per_m,
+        input.output_price_per_m,
     )?;
     Ok(Json(json!(ConnectionPublic::from(row))))
 }
@@ -252,6 +245,19 @@ async fn list_routes(
     Ok(Json(json!({ "data": state.store.list_routes()? })))
 }
 
+async fn get_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    let row = state
+        .store
+        .get_route(&id)?
+        .ok_or_else(|| AppError::NotFound("route not found".into()))?;
+    Ok(Json(json!(row)))
+}
+
 async fn create_route(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -276,6 +282,33 @@ async fn create_route(
         &targets,
     )?;
     Ok((StatusCode::CREATED, Json(json!(row))))
+}
+
+async fn update_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<RouteInput>,
+) -> AppResult<Json<Value>> {
+    check_admin(&state, &headers)?;
+    if state.store.get_route(&id)?.is_none() {
+        return Err(AppError::NotFound("route not found".into()));
+    }
+    if input.targets.is_empty() {
+        return Err(AppError::BadRequest("at least one target required".into()));
+    }
+    let targets: Vec<(String, Option<String>)> = input
+        .targets
+        .into_iter()
+        .map(|t| (t.connection_id, t.model_override))
+        .collect();
+    let row = state.store.upsert_route(
+        Some(id),
+        input.public_model.trim(),
+        &input.strategy,
+        &targets,
+    )?;
+    Ok(Json(json!(row)))
 }
 
 async fn delete_route(
@@ -367,4 +400,10 @@ async fn usage(
 ) -> AppResult<Json<Value>> {
     check_admin(&state, &headers)?;
     Ok(Json(json!({ "data": state.store.recent_usage(100)? })))
+}
+
+// re-export for cookie name used by tests/docs
+#[allow(dead_code)]
+pub fn admin_cookie_name() -> &'static str {
+    ADMIN_COOKIE
 }

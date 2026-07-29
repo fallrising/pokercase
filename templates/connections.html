@@ -17,20 +17,32 @@
         <a href="/admin/keys">API Keys</a>
         <a href="/admin/usage">Usage</a>
       </nav>
+      {% if admin_protected %}
+      <form method="post" action="/admin/logout" class="logout"><button type="submit" class="ghost">Logout</button></form>
+      {% endif %}
     </aside>
     <main class="content">
-      <h1>Connections</h1>
-      <p class="muted">An OpenAI-compatible upstream: base URL + API key. Example base: <code>https://api.openai.com/v1</code></p>
+      <h1>{% if edit %}Edit connection{% else %}Connections{% endif %}</h1>
+      <p class="muted">OpenAI-compatible upstream: base URL + API key. Example: <code>https://api.openai.com/v1</code></p>
 
       <section class="panel">
-        <h2>Add connection</h2>
-        <form method="post" action="/admin/connections/new" class="form-grid">
-          <label>Name <input name="name" required placeholder="openai" /></label>
-          <label>Base URL <input name="base_url" required placeholder="https://api.openai.com/v1" /></label>
-          <label>API Key <input name="api_key" required type="password" placeholder="sk-..." /></label>
-          <label>Default model <input name="default_model" placeholder="gpt-4o-mini" /></label>
-          <label>Priority <input name="priority" type="number" value="100" /></label>
-          <button type="submit">Create</button>
+        <h2>{% if edit %}Update{% else %}Add connection{% endif %}</h2>
+        <form method="post" action="{% if edit %}/admin/connections/{{ form.id }}/update{% else %}/admin/connections/new{% endif %}" class="form-grid">
+          <label>Name <input name="name" required placeholder="openai" value="{{ form.name }}" /></label>
+          <label>Base URL <input name="base_url" required placeholder="https://api.openai.com/v1" value="{{ form.base_url }}" /></label>
+          <label>API Key <input name="api_key" type="password" placeholder="{% if edit %}leave blank to keep{% else %}sk-...{% endif %}" {% if not edit %}required{% endif %} /></label>
+          <label>Default model <input name="default_model" placeholder="gpt-4o-mini" value="{{ form.default_model }}" /></label>
+          <label>Priority <input name="priority" type="number" value="{{ form.priority }}" /></label>
+          <label>Enabled
+            <select name="enabled">
+              <option value="1" {% if form.enabled %}selected{% endif %}>yes</option>
+              <option value="0" {% if not form.enabled %}selected{% endif %}>no</option>
+            </select>
+          </label>
+          <label>$ / 1M input tokens <input name="input_price_per_m" placeholder="0.15" value="{{ form.input_price_per_m }}" /></label>
+          <label>$ / 1M output tokens <input name="output_price_per_m" placeholder="0.60" value="{{ form.output_price_per_m }}" /></label>
+          <button type="submit">{% if edit %}Save{% else %}Create{% endif %}</button>
+          {% if edit %}<a class="btn-link" href="/admin/connections">Cancel</a>{% endif %}
         </form>
       </section>
 
@@ -58,7 +70,9 @@
               <td>{{ c.default_model or "—" }}</td>
               <td>{{ c.priority }}</td>
               <td>{% if c.enabled %}yes{% else %}no{% endif %}</td>
-              <td>
+              <td class="actions">
+                <button type="button" class="secondary" onclick="testConn('{{ c.id }}', this)">Test</button>
+                <a class="btn-link" href="/admin/connections/{{ c.id }}/edit">Edit</a>
                 <form method="post" action="/admin/connections/{{ c.id }}/delete" onsubmit="return confirm('Delete {{ c.name }}?')">
                   <button type="submit" class="danger">Delete</button>
                 </form>
@@ -70,8 +84,32 @@
         {% else %}
         <p class="muted">No connections yet.</p>
         {% endif %}
+        <p id="test-result" class="muted small"></p>
       </section>
     </main>
   </div>
+  <script>
+    async function testConn(id, btn) {
+      const el = document.getElementById('test-result');
+      el.textContent = 'Testing…';
+      btn.disabled = true;
+      try {
+        const r = await fetch('/admin/api/connections/' + id + '/test', { method: 'POST', credentials: 'same-origin' });
+        const j = await r.json();
+        if (r.ok && j.ok) {
+          el.textContent = 'OK ' + j.status + ' — ' + (j.url || '');
+          el.className = 'muted small ok-text';
+        } else {
+          el.textContent = 'Fail ' + (j.status || r.status) + ' — ' + (j.body_snippet || j.error?.message || '');
+          el.className = 'muted small err-text';
+        }
+      } catch (e) {
+        el.textContent = 'Error: ' + e;
+        el.className = 'muted small err-text';
+      } finally {
+        btn.disabled = false;
+      }
+    }
+  </script>
 </body>
 </html>

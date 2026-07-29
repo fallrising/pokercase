@@ -17,6 +17,9 @@
         <a href="/admin/keys" class="active">API Keys</a>
         <a href="/admin/usage">Usage</a>
       </nav>
+      {% if admin_protected %}
+      <form method="post" action="/admin/logout" class="logout"><button type="submit" class="ghost">Logout</button></form>
+      {% endif %}
     </aside>
     <main class="content">
       <h1>API Keys</h1>

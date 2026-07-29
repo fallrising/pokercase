@@ -2,11 +2,15 @@
 name = "thinrouter"
 version = "0.1.0"
 edition = "2021"
-description = "A thin OpenAI-compatible LLM API proxy with web admin UI"
+description = "A thin OpenAI-compatible LLM API proxy with web admin UI (repo: fallrising/pokercase)"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/fallrising/pokercase"
+keywords = ["llm", "proxy", "openai", "router"]
+categories = ["command-line-utilities", "web-programming"]
 
 [dependencies]
+aes-gcm = "0.10"
 anyhow = "1"
 async-stream = "0.3"
 axum = { version = "0.8", features = ["macros", "form"] }
@@ -14,11 +18,13 @@ base64 = "0.22"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.28"
 dirs = "6"
 futures-util = "0.3"
 hex = "0.4"
 minijinja = { version = "2", features = ["loader"] }
 rand = "0.9"
+ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -34,5 +40,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+http-body-util = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tempfile = "3"
 tokio-test = "0.4"
+tower = { version = "0.5", features = ["util"] }

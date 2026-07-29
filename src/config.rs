@@ -9,6 +9,10 @@ pub struct AppConfig {
     pub port: u16,
     pub data_dir: PathBuf,
     pub admin_token: Option<String>,
+    /// Optional passphrase for encrypting connection API keys at rest.
+    pub secrets_key: Option<String>,
+    /// Max idle time between SSE chunks before aborting (seconds).
+    pub sse_stall_secs: u64,
 }
 
 impl AppConfig {
@@ -17,6 +21,8 @@ impl AppConfig {
         port: u16,
         data_dir: Option<PathBuf>,
         admin_token: Option<String>,
+        secrets_key: Option<String>,
+        sse_stall_secs: Option<u64>,
     ) -> Result<Self> {
         let data_dir = match data_dir {
             Some(p) => p,
@@ -36,6 +42,8 @@ impl AppConfig {
             port,
             data_dir,
             admin_token,
+            secrets_key: secrets_key.filter(|s| !s.is_empty()),
+            sse_stall_secs: sse_stall_secs.unwrap_or(90),
         })
     }
 
